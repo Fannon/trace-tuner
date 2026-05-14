@@ -8,6 +8,8 @@ use std::sync::{
 };
 
 pub mod core;
+#[cfg(feature = "gui")]
+mod ui;
 
 use core::{
     map_frequency, DetectionSnapshot, MidiDecision, MidiState, ResponseMode, ResponseSmoother,
@@ -194,6 +196,11 @@ impl Plugin for TraceTuner {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    #[cfg(feature = "gui")]
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        ui::create_editor(self.params.clone(), self.shared_state.clone())
     }
 
     fn initialize(
