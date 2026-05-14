@@ -3,7 +3,7 @@ use crate::{
         midi_note_name, tuning_color, DetectionAlgorithm, DetectionSnapshot, ResponseMode,
         TunerMode, TuningColor,
     },
-    SharedTunerState, TraceTunerParams, HISTORY_LEN,
+    HistoryPoint, SharedTunerState, TraceTunerParams, HISTORY_LEN,
 };
 use nih_plug::prelude::{Editor, ParamSetter};
 use nih_plug_egui::{
@@ -26,6 +26,7 @@ const IN_TUNE_CENTS: f32 = 10.0;
 const HISTORY_MIN_HEIGHT: f32 = 142.0;
 const METER_HEIGHT: f32 = 22.0;
 const CONTROL_HEIGHT: f32 = 24.0;
+const TRACE_BREAK_CENTS: f32 = 35.0;
 
 pub fn create_editor(
     params: Arc<TraceTunerParams>,
@@ -111,7 +112,7 @@ fn draw_header(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {
     });
 }
 
-fn draw_history(ui: &mut egui::Ui, history: &[(f32, f32); HISTORY_LEN]) {
+fn draw_history(ui: &mut egui::Ui, history: &[HistoryPoint; HISTORY_LEN]) {
     let reserved_height = METER_HEIGHT + CONTROL_HEIGHT + ui.spacing().item_spacing.y * 2.0;
     let desired = Vec2::new(
         ui.available_width(),
@@ -146,26 +147,46 @@ fn draw_history(ui: &mut egui::Ui, history: &[(f32, f32); HISTORY_LEN]) {
     }
 
     let step = rect.width() / (HISTORY_LEN.saturating_sub(1)) as f32;
-    let mut previous: Option<(Pos2, f32, f32)> = None;
-    for (index, (cents, confidence)) in history.iter().copied().enumerate() {
-        if cents.is_finite() {
+    let mut previous: Option<(Pos2, HistoryPoint)> = None;
+    for (index, point_data) in history.iter().copied().enumerate() {
+        if point_data.cents.is_finite() {
             let point = Pos2::new(
                 rect.left() + step * index as f32,
-                cents_to_y(rect, cents.clamp(-TUNING_RANGE_CENTS, TUNING_RANGE_CENTS)),
+                cents_to_y(
+                    rect,
+                    point_data
+                        .cents
+                        .clamp(-TUNING_RANGE_CENTS, TUNING_RANGE_CENTS),
+                ),
             );
-            if let Some((last, last_cents, last_confidence)) = previous {
-                let segment_confidence = confidence.min(last_confidence);
-                let stroke = Stroke::new(
-                    2.5,
-                    faded_line_color_for_cents((last_cents + cents) * 0.5, segment_confidence),
-                );
-                painter.line_segment([last, point], stroke);
+            if let Some((last, last_data)) = previous {
+                if trace_points_connect(last_data, point_data) {
+                    let segment_confidence = point_data.confidence.min(last_data.confidence);
+                    let stroke = Stroke::new(
+                        if point_data.held && last_data.held {
+                            2.0
+                        } else {
+                            2.5
+                        },
+                        faded_line_color_for_cents(
+                            (last_data.cents + point_data.cents) * 0.5,
+                            segment_confidence,
+                        ),
+                    );
+                    painter.line_segment([last, point], stroke);
+                }
             }
-            previous = Some((point, cents, confidence));
+            previous = Some((point, point_data));
         } else {
             previous = None;
         }
     }
+}
+
+fn trace_points_connect(previous: HistoryPoint, current: HistoryPoint) -> bool {
+    previous.midi_note == current.midi_note
+        && previous.held == current.held
+        && (current.cents - previous.cents).abs() <= TRACE_BREAK_CENTS
 }
 
 fn draw_meter(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {

@@ -55,6 +55,7 @@ pub struct TraceTunerParams {
 
 pub struct SharedTunerState {
     active: AtomicBool,
+    held: AtomicBool,
     frequency_hz: AtomicF32,
     confidence: AtomicF32,
     rms: AtomicF32,
@@ -63,13 +64,24 @@ pub struct SharedTunerState {
     cents: AtomicF32,
     history: [AtomicF32; HISTORY_LEN],
     history_confidence: [AtomicF32; HISTORY_LEN],
+    history_midi_note: [AtomicU8; HISTORY_LEN],
+    history_held: [AtomicBool; HISTORY_LEN],
     history_write_pos: AtomicUsize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HistoryPoint {
+    pub cents: f32,
+    pub confidence: f32,
+    pub midi_note: u8,
+    pub held: bool,
 }
 
 impl Default for SharedTunerState {
     fn default() -> Self {
         Self {
             active: AtomicBool::new(false),
+            held: AtomicBool::new(false),
             frequency_hz: AtomicF32::new(0.0),
             confidence: AtomicF32::new(0.0),
             rms: AtomicF32::new(0.0),
@@ -78,6 +90,8 @@ impl Default for SharedTunerState {
             cents: AtomicF32::new(0.0),
             history: std::array::from_fn(|_| AtomicF32::new(f32::NAN)),
             history_confidence: std::array::from_fn(|_| AtomicF32::new(f32::NAN)),
+            history_midi_note: std::array::from_fn(|_| AtomicU8::new(0)),
+            history_held: std::array::from_fn(|_| AtomicBool::new(false)),
             history_write_pos: AtomicUsize::new(0),
         }
     }
@@ -87,6 +101,7 @@ impl SharedTunerState {
     pub fn snapshot(&self) -> DetectionSnapshot {
         DetectionSnapshot {
             active: self.active.load(Ordering::Relaxed),
+            held: self.held.load(Ordering::Relaxed),
             frequency_hz: self.frequency_hz.load(Ordering::Relaxed),
             confidence: self.confidence.load(Ordering::Relaxed),
             rms: self.rms.load(Ordering::Relaxed),
@@ -96,19 +111,22 @@ impl SharedTunerState {
         }
     }
 
-    pub fn history(&self) -> [(f32, f32); HISTORY_LEN] {
+    pub fn history(&self) -> [HistoryPoint; HISTORY_LEN] {
         let write_pos = self.history_write_pos.load(Ordering::Relaxed);
         std::array::from_fn(|index| {
             let source = (write_pos + index) % HISTORY_LEN;
-            (
-                self.history[source].load(Ordering::Relaxed),
-                self.history_confidence[source].load(Ordering::Relaxed),
-            )
+            HistoryPoint {
+                cents: self.history[source].load(Ordering::Relaxed),
+                confidence: self.history_confidence[source].load(Ordering::Relaxed),
+                midi_note: self.history_midi_note[source].load(Ordering::Relaxed),
+                held: self.history_held[source].load(Ordering::Relaxed),
+            }
         })
     }
 
     fn publish(&self, snapshot: DetectionSnapshot) {
         self.active.store(snapshot.active, Ordering::Relaxed);
+        self.held.store(snapshot.held, Ordering::Relaxed);
         self.frequency_hz
             .store(snapshot.frequency_hz, Ordering::Relaxed);
         self.confidence
@@ -136,6 +154,15 @@ impl SharedTunerState {
             },
             Ordering::Relaxed,
         );
+        self.history_midi_note[write_pos].store(
+            if snapshot.active {
+                snapshot.midi_note
+            } else {
+                0
+            },
+            Ordering::Relaxed,
+        );
+        self.history_held[write_pos].store(snapshot.active && snapshot.held, Ordering::Relaxed);
         self.history_write_pos
             .store((write_pos + 1) % HISTORY_LEN, Ordering::Relaxed);
     }
@@ -291,6 +318,7 @@ impl Plugin for TraceTuner {
                         map_frequency(pitch.frequency_hz, reference_pitch_hz, mode).map(|note| {
                             DetectionSnapshot {
                                 active: true,
+                                held: false,
                                 frequency_hz: pitch.frequency_hz,
                                 confidence: pitch.confidence,
                                 rms: pitch.rms,
@@ -364,6 +392,56 @@ impl TraceTuner {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::midi_note_frequency;
+
+    fn snapshot(midi_note: u8, cents: f32, held: bool) -> DetectionSnapshot {
+        DetectionSnapshot {
+            active: true,
+            held,
+            frequency_hz: midi_note_frequency(midi_note, 440.0),
+            confidence: 0.75,
+            rms: 0.1,
+            midi_note,
+            target_frequency_hz: midi_note_frequency(midi_note, 440.0),
+            cents,
+        }
+    }
+
+    #[test]
+    fn shared_state_history_keeps_note_and_held_metadata() {
+        let state = SharedTunerState::default();
+
+        state.publish(snapshot(69, 4.0, false));
+        state.publish(snapshot(69, 4.0, true));
+        state.publish(snapshot(71, -8.0, false));
+
+        let history = state.history();
+        let recent = &history[HISTORY_LEN - 3..];
+
+        assert_eq!(recent[0].midi_note, 69);
+        assert!(!recent[0].held);
+        assert_eq!(recent[1].midi_note, 69);
+        assert!(recent[1].held);
+        assert_eq!(recent[2].midi_note, 71);
+        assert!(!recent[2].held);
+    }
+
+    #[test]
+    fn shared_state_snapshot_reports_held_status() {
+        let state = SharedTunerState::default();
+
+        state.publish(snapshot(69, 0.0, true));
+
+        let snapshot = state.snapshot();
+        assert!(snapshot.active);
+        assert!(snapshot.held);
+        assert_eq!(snapshot.midi_note, 69);
     }
 }
 

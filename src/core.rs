@@ -8,6 +8,8 @@ pub(crate) const ACQUIRE_CONFIDENCE: f32 = 0.80;
 pub(crate) const HOLD_CONFIDENCE: f32 = 0.60;
 const STABLE_DISPLAY_HOLD_FRAMES: u8 = 96;
 const FAST_DISPLAY_HOLD_FRAMES: u8 = 12;
+const STABLE_CONFIRM_FRAMES: u8 = 3;
+const FAST_CONFIRM_FRAMES: u8 = 1;
 
 const PRE_EMPHASIS_ALPHA: f32 = 0.30;
 const MIN_ANALYSIS_RMS: f32 = 0.0025;
@@ -65,6 +67,7 @@ pub struct NoteMatch {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DetectionSnapshot {
     pub active: bool,
+    pub held: bool,
     pub frequency_hz: f32,
     pub confidence: f32,
     pub rms: f32,
@@ -77,6 +80,7 @@ impl DetectionSnapshot {
     pub const fn idle() -> Self {
         Self {
             active: false,
+            held: false,
             frequency_hz: 0.0,
             confidence: 0.0,
             rms: 0.0,
@@ -583,31 +587,47 @@ impl ResponseSmoother {
             return self.update_missing();
         }
 
-        let required = match self.mode {
-            ResponseMode::Stable => 3,
-            ResponseMode::Fast => 1,
-        };
+        let required = self.confirmation_frames();
 
-        if !self.current.active || next.midi_note == self.current.midi_note {
+        if !self.current.active {
+            if self.update_candidate(next.midi_note) >= required {
+                self.accept(next);
+            }
+            return self.current;
+        }
+
+        if next.midi_note == self.current.midi_note {
             self.accept(next);
             return self.current;
         }
 
-        if self.candidate_note == Some(next.midi_note) {
-            self.candidate_count = self.candidate_count.saturating_add(1);
-        } else {
-            self.candidate_note = Some(next.midi_note);
-            self.candidate_count = 1;
-        }
-
-        if self.candidate_count >= required {
+        if self.update_candidate(next.midi_note) >= required {
             self.accept(next);
         }
 
         self.current
     }
 
+    fn confirmation_frames(&self) -> u8 {
+        match self.mode {
+            ResponseMode::Stable => STABLE_CONFIRM_FRAMES,
+            ResponseMode::Fast => FAST_CONFIRM_FRAMES,
+        }
+    }
+
+    fn update_candidate(&mut self, midi_note: u8) -> u8 {
+        if self.candidate_note == Some(midi_note) {
+            self.candidate_count = self.candidate_count.saturating_add(1);
+        } else {
+            self.candidate_note = Some(midi_note);
+            self.candidate_count = 1;
+        }
+        self.candidate_count
+    }
+
     fn accept(&mut self, next: DetectionSnapshot) {
+        let mut next = next;
+        next.held = false;
         let weight = match self.mode {
             ResponseMode::Stable => 0.25,
             ResponseMode::Fast => 0.65,
@@ -624,6 +644,7 @@ impl ResponseSmoother {
         } else {
             self.current = next;
         }
+        self.current.held = false;
 
         self.candidate_note = None;
         self.candidate_count = 0;
@@ -654,6 +675,7 @@ impl ResponseSmoother {
             if self.missing_count < hold_frames {
                 let held_progress = self.missing_count as f32 / hold_frames as f32;
                 self.current.confidence = HOLD_CONFIDENCE * (1.0 - held_progress);
+                self.current.held = true;
                 return self.current;
             }
         }
@@ -812,6 +834,12 @@ mod tests {
         active_snapshot_with_confidence(midi_note, cents, 0.9)
     }
 
+    fn acquire_stable(smoother: &mut ResponseSmoother, snapshot: DetectionSnapshot) {
+        for _ in 0..STABLE_CONFIRM_FRAMES {
+            smoother.update(Some(snapshot));
+        }
+    }
+
     fn active_snapshot_with_confidence(
         midi_note: u8,
         cents: f32,
@@ -819,6 +847,7 @@ mod tests {
     ) -> DetectionSnapshot {
         DetectionSnapshot {
             active: true,
+            held: false,
             frequency_hz: midi_note_frequency(midi_note, 440.0),
             confidence,
             rms: 0.2,
@@ -1195,7 +1224,7 @@ mod tests {
         let mut stable = ResponseSmoother::new(ResponseMode::Stable);
         let mut fast = ResponseSmoother::new(ResponseMode::Fast);
 
-        stable.update(Some(active_snapshot(69, 0.0)));
+        acquire_stable(&mut stable, active_snapshot(69, 0.0));
         fast.update(Some(active_snapshot(69, 0.0)));
 
         let stable_after_one = stable.update(Some(active_snapshot(71, 0.0)));
@@ -1214,7 +1243,7 @@ mod tests {
         let mut stable = ResponseSmoother::new(ResponseMode::Stable);
         let mut fast = ResponseSmoother::new(ResponseMode::Fast);
 
-        stable.update(Some(active_snapshot(69, 0.0)));
+        acquire_stable(&mut stable, active_snapshot(69, 0.0));
         fast.update(Some(active_snapshot(69, 0.0)));
 
         let stable_update = stable.update(Some(active_snapshot(69, 20.0)));
@@ -1228,7 +1257,7 @@ mod tests {
     #[test]
     fn stable_display_holds_through_brief_missing_detection() {
         let mut stable = ResponseSmoother::new(ResponseMode::Stable);
-        stable.update(Some(active_snapshot(69, 0.0)));
+        acquire_stable(&mut stable, active_snapshot(69, 0.0));
 
         for _ in 0..(STABLE_DISPLAY_HOLD_FRAMES - 1) {
             let held = stable.update(None);
@@ -1242,11 +1271,12 @@ mod tests {
     #[test]
     fn held_display_fades_confidence_while_note_rings_out() {
         let mut stable = ResponseSmoother::new(ResponseMode::Stable);
-        stable.update(Some(active_snapshot(69, 0.0)));
+        acquire_stable(&mut stable, active_snapshot(69, 0.0));
 
         let held = stable.update(None);
 
         assert!(held.active);
+        assert!(held.held);
         assert_eq!(held.midi_note, 69);
         assert!(held.confidence < HOLD_CONFIDENCE);
     }
@@ -1254,13 +1284,30 @@ mod tests {
     #[test]
     fn stable_display_keeps_lower_confidence_same_note() {
         let mut stable = ResponseSmoother::new(ResponseMode::Stable);
-        stable.update(Some(active_snapshot(69, 0.0)));
+        acquire_stable(&mut stable, active_snapshot(69, 0.0));
 
         let updated = stable.update(Some(active_snapshot_with_confidence(69, 8.0, 0.65)));
 
         assert!(updated.active);
+        assert!(!updated.held);
         assert_eq!(updated.midi_note, 69);
         assert!(updated.cents > 0.0);
+    }
+
+    #[test]
+    fn stable_acquisition_waits_for_sustained_pitch() {
+        let mut stable = ResponseSmoother::new(ResponseMode::Stable);
+
+        let attack = stable.update(Some(active_snapshot(69, 24.0)));
+        assert!(!attack.active);
+
+        let settling = stable.update(Some(active_snapshot(69, 10.0)));
+        assert!(!settling.active);
+
+        let sustained = stable.update(Some(active_snapshot(69, 1.5)));
+        assert!(sustained.active);
+        assert_eq!(sustained.midi_note, 69);
+        assert!((sustained.cents - 1.5).abs() < 0.01);
     }
 
     // --- midi ---
@@ -1383,7 +1430,7 @@ mod tests {
     #[test]
     fn smoother_mode_switch_resets_candidate() {
         let mut smoother = ResponseSmoother::new(ResponseMode::Stable);
-        smoother.update(Some(active_snapshot(69, 0.0)));
+        acquire_stable(&mut smoother, active_snapshot(69, 0.0));
 
         smoother.update(Some(active_snapshot(71, 0.0)));
         assert_eq!(
@@ -1399,7 +1446,7 @@ mod tests {
     #[test]
     fn smoother_reset_forces_new_acquisition() {
         let mut smoother = ResponseSmoother::new(ResponseMode::Stable);
-        smoother.update(Some(active_snapshot(69, 0.0)));
+        acquire_stable(&mut smoother, active_snapshot(69, 0.0));
         assert_eq!(
             smoother.update(Some(active_snapshot(69, 5.0))).midi_note,
             69
@@ -1407,8 +1454,13 @@ mod tests {
 
         smoother.reset();
         let after_reset = smoother.update(Some(active_snapshot(71, 10.0)));
-        assert!(after_reset.active);
-        assert_eq!(after_reset.midi_note, 71);
+        assert!(!after_reset.active);
+
+        smoother.update(Some(active_snapshot(71, 8.0)));
+        let after_reacquire = smoother.update(Some(active_snapshot(71, 2.0)));
+        assert!(after_reacquire.active);
+        assert_eq!(after_reacquire.midi_note, 71);
+        assert!((after_reacquire.cents - 2.0).abs() < 0.01);
     }
 
     #[test]
