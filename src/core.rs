@@ -159,6 +159,9 @@ pub fn map_frequency(
 }
 
 pub fn cents_between(frequency_hz: f32, target_frequency_hz: f32) -> f32 {
+    if target_frequency_hz <= 0.0 || frequency_hz <= 0.0 {
+        return 0.0;
+    }
     1200.0 * (frequency_hz / target_frequency_hz).log2()
 }
 
@@ -364,6 +367,10 @@ impl PitchDetector {
                 }
                 let better_tau = parabolic_interpolation(&self.yin_cumulative_mean, tau, max_tau);
                 let frequency_hz = self.sample_rate / better_tau;
+                if frequency_hz < self.min_frequency_hz || frequency_hz > self.max_frequency_hz {
+                    tau += 1;
+                    continue;
+                }
                 let confidence = (1.0 - self.yin_cumulative_mean[tau]).clamp(0.0, 1.0);
                 return Some(PitchEstimate {
                     frequency_hz,
@@ -389,8 +396,11 @@ impl PitchDetector {
     //   • Clipping-resistant – the normalisation compensates for
     //     amplitude variation across the window.
     //   • Confidence is the peak height itself – more intuitive.
-    //   • No cumulative-mean trick needed – better octave error rate.
+    //   • No cumulative-mean trick needed.
     //   • Parabolic interpolation on the nsdf peak refines pitch.
+    //   • Uses first-peak-above-threshold search to avoid octave errors
+    //     on clean periodic signals where subharmonic NSDF peaks can
+    //     equal the fundamental peak.
     // ==================================================================
     fn detect_mpm(&mut self, rms: f32, n: usize) -> Option<PitchEstimate> {
         let (min_tau, max_tau) = self.tau_range(n)?;
@@ -408,41 +418,45 @@ impl PitchDetector {
             let a = &self.pre_emphasized[..window_limit];
             let b = &self.pre_emphasized[tau..tau + window_limit];
             let mut r = 0.0;
+            let mut r_front = 0.0;
             let mut r_back = 0.0;
             for i in 0..window_limit {
                 r += a[i] * b[i];
+                r_front += a[i] * a[i];
                 r_back += b[i] * b[i];
             }
             self.mpm_acf[tau] = r;
-            self.mpm_nsdf[tau] = if r_back > 1e-10 && self.mpm_acf[0] > 1e-10 {
-                (2.0 * r / (self.mpm_acf[0] + r_back)).clamp(-1.0, 1.0)
+            self.mpm_nsdf[tau] = if r_front > 1e-10 && r_back > 1e-10 {
+                (2.0 * r / (r_front + r_back)).clamp(-1.0, 1.0)
             } else {
                 0.0
             };
         }
 
-        // Search for the highest nsdf peak in the valid tau range.
-        let mut best_tau = min_tau;
-        let mut best_val = self.mpm_nsdf[min_tau];
-        for tau in min_tau + 1..=max_tau {
-            if self.mpm_nsdf[tau] > best_val {
-                best_val = self.mpm_nsdf[tau];
-                best_tau = tau;
+        // Find the first local peak above threshold in the valid tau range.
+        // First-peak avoids octave errors where subharmonic NSDF peaks can
+        // equal the fundamental peak on clean periodic signals.
+        let mpm_threshold = 0.50;
+        for tau in min_tau + 1..max_tau {
+            if self.mpm_nsdf[tau] > mpm_threshold
+                && self.mpm_nsdf[tau] > self.mpm_nsdf[tau - 1]
+                && self.mpm_nsdf[tau] >= self.mpm_nsdf[tau + 1]
+            {
+                let better_tau = parabolic_interpolation(&self.mpm_nsdf, tau, max_tau);
+                let frequency_hz = self.sample_rate / better_tau;
+                if frequency_hz < self.min_frequency_hz || frequency_hz > self.max_frequency_hz {
+                    continue;
+                }
+                let confidence = self.mpm_nsdf[tau].clamp(0.0, 1.0);
+                return Some(PitchEstimate {
+                    frequency_hz,
+                    confidence,
+                    rms,
+                });
             }
         }
 
-        if best_val <= 0.05 {
-            return None;
-        }
-
-        let better_tau = parabolic_interpolation(&self.mpm_nsdf, best_tau, max_tau);
-        let frequency_hz = self.sample_rate / better_tau;
-        let confidence = best_val.clamp(0.0, 1.0);
-        Some(PitchEstimate {
-            frequency_hz,
-            confidence,
-            rms,
-        })
+        None
     }
 
     // ==================================================================
@@ -891,7 +905,7 @@ mod tests {
     #[test]
     fn mpm_detects_high_frequency() {
         let freq = detect_freq(DetectionAlgorithm::Mpm, 1_000.0, 48_000.0);
-        assert!((freq - 1_000.0).abs() < 6.0);
+        assert!((freq - 1_000.0).abs() < 6.0, "detected: {freq}");
     }
 
     #[test]
