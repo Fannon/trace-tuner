@@ -3,6 +3,10 @@ use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
 use std::sync::Arc;
 
+pub mod core;
+
+use core::{ResponseMode, TunerMode};
+
 pub struct TraceTuner {
     params: Arc<TraceTunerParams>,
 }
@@ -21,22 +25,6 @@ pub struct TraceTunerParams {
 
     #[id = "a4"]
     pub reference_pitch: FloatParam,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
-pub enum TunerMode {
-    #[id = "chromatic"]
-    Chromatic,
-    #[id = "guitar"]
-    Guitar,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
-pub enum ResponseMode {
-    #[id = "stable"]
-    Stable,
-    #[id = "reactive"]
-    Reactive,
 }
 
 impl Default for TraceTuner {
