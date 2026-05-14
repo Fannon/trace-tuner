@@ -15,6 +15,7 @@ const PRE_EMPHASIS_ALPHA: f32 = 0.30;
 const MIN_ANALYSIS_RMS: f32 = 0.0025;
 const FULL_CONFIDENCE_RMS: f32 = 0.01;
 const QUIET_CONFIDENCE_FLOOR: f32 = 0.35;
+const MPM_CUTOFF: f32 = 0.90;
 
 const NOTE_NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
@@ -443,30 +444,18 @@ impl PitchDetector {
             };
         }
 
-        // Find the first local peak above threshold in the valid tau range.
-        // First-peak avoids octave errors where subharmonic NSDF peaks can
-        // equal the fundamental peak on clean periodic signals.
-        let mpm_threshold = 0.50;
-        for tau in min_tau + 1..max_tau {
-            if self.mpm_nsdf[tau] > mpm_threshold
-                && self.mpm_nsdf[tau] > self.mpm_nsdf[tau - 1]
-                && self.mpm_nsdf[tau] >= self.mpm_nsdf[tau + 1]
-            {
-                let better_tau = parabolic_interpolation(&self.mpm_nsdf, tau, max_tau);
-                let frequency_hz = self.sample_rate / better_tau;
-                if frequency_hz < self.min_frequency_hz || frequency_hz > self.max_frequency_hz {
-                    continue;
-                }
-                let confidence = self.mpm_nsdf[tau].clamp(0.0, 1.0);
-                return Some(PitchEstimate {
-                    frequency_hz,
-                    confidence,
-                    rms,
-                });
-            }
+        let peak_tau = mpm_pick_peak(&self.mpm_nsdf, min_tau, max_tau)?;
+        let better_tau = parabolic_interpolation(&self.mpm_nsdf, peak_tau, max_tau);
+        let frequency_hz = self.sample_rate / better_tau;
+        if frequency_hz < self.min_frequency_hz || frequency_hz > self.max_frequency_hz {
+            return None;
         }
 
-        None
+        Some(PitchEstimate {
+            frequency_hz,
+            confidence: self.mpm_nsdf[peak_tau].clamp(0.0, 1.0),
+            rms,
+        })
     }
 
     // ==================================================================
@@ -799,6 +788,63 @@ fn rms_confidence_scale(rms: f32) -> f32 {
         let progress =
             ((rms - MIN_ANALYSIS_RMS) / (FULL_CONFIDENCE_RMS - MIN_ANALYSIS_RMS)).clamp(0.0, 1.0);
         QUIET_CONFIDENCE_FLOOR + (1.0 - QUIET_CONFIDENCE_FLOOR) * progress
+    }
+}
+
+fn mpm_pick_peak(nsdf: &[f32], min_tau: usize, max_tau: usize) -> Option<usize> {
+    if max_tau <= min_tau + 2 {
+        return None;
+    }
+
+    let mut highest: Option<f32> = None;
+    visit_mpm_key_peaks(nsdf, min_tau, max_tau, |_, value| {
+        highest = Some(highest.map_or(value, |current| current.max(value)));
+        true
+    });
+
+    let highest = highest?;
+    let cutoff = highest * MPM_CUTOFF;
+
+    let mut selected = None;
+    visit_mpm_key_peaks(nsdf, min_tau, max_tau, |tau, value| {
+        if value >= cutoff {
+            selected = Some(tau);
+            false
+        } else {
+            true
+        }
+    });
+    selected
+}
+
+fn visit_mpm_key_peaks(
+    nsdf: &[f32],
+    min_tau: usize,
+    max_tau: usize,
+    mut visitor: impl FnMut(usize, f32) -> bool,
+) {
+    let mut tau = min_tau.max(1);
+    while tau < max_tau {
+        while tau < max_tau && nsdf[tau] <= 0.0 {
+            tau += 1;
+        }
+        if tau >= max_tau {
+            break;
+        }
+
+        let mut peak_tau = tau;
+        let mut peak_value = nsdf[tau];
+        while tau < max_tau && nsdf[tau] > 0.0 {
+            if nsdf[tau] > peak_value {
+                peak_value = nsdf[tau];
+                peak_tau = tau;
+            }
+            tau += 1;
+        }
+
+        if peak_tau > min_tau && peak_tau < max_tau && !visitor(peak_tau, peak_value) {
+            break;
+        }
     }
 }
 
@@ -1155,6 +1201,35 @@ mod tests {
         samples
     }
 
+    fn harmonic_wave(
+        freq_hz: f32,
+        sample_rate: f32,
+        length: usize,
+        fundamental: f32,
+        second_harmonic: f32,
+    ) -> Vec<f32> {
+        (0..length)
+            .map(|i| {
+                let t = i as f32 / sample_rate;
+                (TAU * freq_hz * t).sin() * fundamental
+                    + (TAU * freq_hz * 2.0 * t).sin() * second_harmonic
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mpm_peak_picker_uses_relative_cutoff() {
+        let mut nsdf = vec![0.0; 16];
+        nsdf[4] = 0.10;
+        nsdf[5] = 0.55;
+        nsdf[6] = 0.20;
+        nsdf[9] = 0.30;
+        nsdf[10] = 1.00;
+        nsdf[11] = 0.30;
+
+        assert_eq!(mpm_pick_peak(&nsdf, 2, 14), Some(10));
+    }
+
     #[test]
     fn yin_detects_sawtooth_440hz() {
         let mut detector = PitchDetector::new(48_000.0, 2_048);
@@ -1171,6 +1246,19 @@ mod tests {
         let samples = sawtooth_wave(440.0, 48_000.0, 2_048);
         let pitch = detector.detect(&samples).unwrap();
         assert!((pitch.frequency_hz - 440.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn mpm_detects_fundamental_with_strong_second_harmonic() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Mpm);
+        let samples = harmonic_wave(220.0, 48_000.0, 2_048, 0.30, 0.45);
+        let pitch = detector.detect(&samples).unwrap();
+        assert!(
+            (pitch.frequency_hz - 220.0).abs() < 3.0,
+            "mpm harmonic-rich: {freq}",
+            freq = pitch.frequency_hz
+        );
     }
 
     #[test]
