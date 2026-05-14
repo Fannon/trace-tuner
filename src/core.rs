@@ -10,6 +10,9 @@ const STABLE_DISPLAY_HOLD_FRAMES: u8 = 96;
 const FAST_DISPLAY_HOLD_FRAMES: u8 = 12;
 
 const PRE_EMPHASIS_ALPHA: f32 = 0.30;
+const MIN_ANALYSIS_RMS: f32 = 0.0025;
+const FULL_CONFIDENCE_RMS: f32 = 0.01;
+const QUIET_CONFIDENCE_FLOOR: f32 = 0.35;
 
 const NOTE_NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
@@ -277,15 +280,18 @@ impl PitchDetector {
         }
 
         let (rms, n) = self.apply_pre_emphasis(samples);
-        if rms < 0.01 {
+        if rms < MIN_ANALYSIS_RMS {
             return None;
         }
 
-        match self.algorithm {
+        let mut estimate = match self.algorithm {
             DetectionAlgorithm::Yin => self.detect_yin(rms, n),
             DetectionAlgorithm::Mpm => self.detect_mpm(rms, n),
             DetectionAlgorithm::Acf => self.detect_acf(rms, n),
-        }
+        }?;
+
+        estimate.confidence *= rms_confidence_scale(rms);
+        Some(estimate)
     }
 
     // ------------------------------------------------------------------
@@ -764,6 +770,16 @@ fn silence_timeout_samples(sample_rate: f32) -> u32 {
         .max(1.0) as u32
 }
 
+fn rms_confidence_scale(rms: f32) -> f32 {
+    if rms >= FULL_CONFIDENCE_RMS {
+        1.0
+    } else {
+        let progress =
+            ((rms - MIN_ANALYSIS_RMS) / (FULL_CONFIDENCE_RMS - MIN_ANALYSIS_RMS)).clamp(0.0, 1.0);
+        QUIET_CONFIDENCE_FLOOR + (1.0 - QUIET_CONFIDENCE_FLOOR) * progress
+    }
+}
+
 fn parabolic_interpolation(values: &[f32], tau: usize, max_tau: usize) -> f32 {
     if tau == 0 || tau >= max_tau {
         return tau as f32;
@@ -813,8 +829,17 @@ mod tests {
     }
 
     fn sine_wave(freq_hz: f32, sample_rate: f32, length: usize) -> Vec<f32> {
+        sine_wave_with_amplitude(freq_hz, sample_rate, length, 0.4)
+    }
+
+    fn sine_wave_with_amplitude(
+        freq_hz: f32,
+        sample_rate: f32,
+        length: usize,
+        amplitude: f32,
+    ) -> Vec<f32> {
         (0..length)
-            .map(|i| (TAU * freq_hz * i as f32 / sample_rate).sin() * 0.4)
+            .map(|i| (TAU * freq_hz * i as f32 / sample_rate).sin() * amplitude)
             .collect()
     }
 
@@ -915,6 +940,32 @@ mod tests {
         let samples = sine_wave(440.0, 48_000.0, 2_048);
         let pitch = detector.detect(&samples).unwrap();
         assert!(pitch.confidence > 0.8);
+    }
+
+    #[test]
+    fn yin_continues_tracking_quiet_sustained_note_below_old_rms_gate() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Yin);
+        let samples = sine_wave_with_amplitude(440.0, 48_000.0, 2_048, 0.013);
+
+        let pitch = detector.detect(&samples).unwrap();
+
+        assert!(pitch.rms < FULL_CONFIDENCE_RMS, "rms: {}", pitch.rms);
+        assert!((pitch.frequency_hz - 440.0).abs() < 1.0);
+        assert!(
+            (HOLD_CONFIDENCE..ACQUIRE_CONFIDENCE).contains(&pitch.confidence),
+            "confidence: {}",
+            pitch.confidence
+        );
+    }
+
+    #[test]
+    fn yin_rejects_near_silence_below_analysis_floor() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Yin);
+        let samples = sine_wave_with_amplitude(440.0, 48_000.0, 2_048, 0.001);
+
+        assert!(detector.detect(&samples).is_none());
     }
 
     #[test]
@@ -1066,11 +1117,10 @@ mod tests {
         let mut samples = sine_wave(freq_hz, sample_rate, length);
         for (i, sample) in samples.iter_mut().enumerate() {
             // Simple LCG pseudo-random noise, deterministic across runs
-            let noise =
-                ((i.wrapping_mul(1103515245).wrapping_add(12345) & 0x7fffffff) as f32
-                    / 0x7fffffff as f32)
-                    * 2.0
-                    - 1.0;
+            let noise = ((i.wrapping_mul(1103515245).wrapping_add(12345) & 0x7fffffff) as f32
+                / 0x7fffffff as f32)
+                * 2.0
+                - 1.0;
             *sample += noise * noise_level;
         }
         samples
@@ -1100,7 +1150,11 @@ mod tests {
         detector.set_algorithm(DetectionAlgorithm::Acf);
         let samples = sawtooth_wave(440.0, 48_000.0, 2_048);
         let pitch = detector.detect(&samples).unwrap();
-        assert!((pitch.frequency_hz - 440.0).abs() < 3.0, "acf sawtooth: {freq}", freq = pitch.frequency_hz);
+        assert!(
+            (pitch.frequency_hz - 440.0).abs() < 3.0,
+            "acf sawtooth: {freq}",
+            freq = pitch.frequency_hz
+        );
     }
 
     #[test]
@@ -1127,7 +1181,11 @@ mod tests {
         detector.set_algorithm(DetectionAlgorithm::Acf);
         let samples = noisy_sine_wave(440.0, 48_000.0, 2_048, 0.01);
         let pitch = detector.detect(&samples).unwrap();
-        assert!((pitch.frequency_hz - 440.0).abs() < 4.0, "acf noisy: {freq}", freq = pitch.frequency_hz);
+        assert!(
+            (pitch.frequency_hz - 440.0).abs() < 4.0,
+            "acf noisy: {freq}",
+            freq = pitch.frequency_hz
+        );
     }
 
     // --- response smoother ---
