@@ -59,6 +59,7 @@ pub struct SharedTunerState {
     target_frequency_hz: AtomicF32,
     cents: AtomicF32,
     history: [AtomicF32; HISTORY_LEN],
+    history_confidence: [AtomicF32; HISTORY_LEN],
     history_write_pos: AtomicUsize,
 }
 
@@ -73,6 +74,7 @@ impl Default for SharedTunerState {
             target_frequency_hz: AtomicF32::new(0.0),
             cents: AtomicF32::new(0.0),
             history: std::array::from_fn(|_| AtomicF32::new(f32::NAN)),
+            history_confidence: std::array::from_fn(|_| AtomicF32::new(f32::NAN)),
             history_write_pos: AtomicUsize::new(0),
         }
     }
@@ -91,11 +93,14 @@ impl SharedTunerState {
         }
     }
 
-    pub fn history(&self) -> [f32; HISTORY_LEN] {
+    pub fn history(&self) -> [(f32, f32); HISTORY_LEN] {
         let write_pos = self.history_write_pos.load(Ordering::Relaxed);
         std::array::from_fn(|index| {
             let source = (write_pos + index) % HISTORY_LEN;
-            self.history[source].load(Ordering::Relaxed)
+            (
+                self.history[source].load(Ordering::Relaxed),
+                self.history_confidence[source].load(Ordering::Relaxed),
+            )
         })
     }
 
@@ -115,6 +120,14 @@ impl SharedTunerState {
         self.history[write_pos].store(
             if snapshot.active {
                 snapshot.cents
+            } else {
+                f32::NAN
+            },
+            Ordering::Relaxed,
+        );
+        self.history_confidence[write_pos].store(
+            if snapshot.active {
+                snapshot.confidence
             } else {
                 f32::NAN
             },

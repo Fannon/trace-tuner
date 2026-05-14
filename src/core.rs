@@ -5,8 +5,8 @@ pub const SILENCE_TIMEOUT_MS: f32 = 120.0;
 
 const ACQUIRE_CONFIDENCE: f32 = 0.80;
 const HOLD_CONFIDENCE: f32 = 0.60;
-const STABLE_DISPLAY_HOLD_FRAMES: u8 = 36;
-const FAST_DISPLAY_HOLD_FRAMES: u8 = 4;
+const STABLE_DISPLAY_HOLD_FRAMES: u8 = 96;
+const FAST_DISPLAY_HOLD_FRAMES: u8 = 12;
 
 const NOTE_NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
@@ -358,6 +358,8 @@ impl ResponseSmoother {
                 ResponseMode::Fast => FAST_DISPLAY_HOLD_FRAMES,
             };
             if self.missing_count < hold_frames {
+                let held_progress = self.missing_count as f32 / hold_frames as f32;
+                self.current.confidence = HOLD_CONFIDENCE * (1.0 - held_progress);
                 return self.current;
             }
         }
@@ -593,6 +595,18 @@ mod tests {
         }
 
         assert!(!stable.update(None).active);
+    }
+
+    #[test]
+    fn held_display_fades_confidence_while_note_rings_out() {
+        let mut stable = ResponseSmoother::new(ResponseMode::Stable);
+        stable.update(Some(active_snapshot(69, 0.0)));
+
+        let held = stable.update(None);
+
+        assert!(held.active);
+        assert_eq!(held.midi_note, 69);
+        assert!(held.confidence < HOLD_CONFIDENCE);
     }
 
     #[test]

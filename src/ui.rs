@@ -20,6 +20,7 @@ const MUTED: Color32 = Color32::from_rgb(116, 124, 134);
 const BLUE: Color32 = Color32::from_rgb(82, 145, 255);
 const TUNING_RANGE_CENTS: f32 = 35.0;
 const IN_TUNE_CENTS: f32 = 10.0;
+const HELD_CONFIDENCE_CUTOFF: f32 = 0.60;
 const HISTORY_MIN_HEIGHT: f32 = 112.0;
 const METER_HEIGHT: f32 = 22.0;
 const CONTROL_HEIGHT: f32 = 24.0;
@@ -108,7 +109,7 @@ fn draw_header(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {
     });
 }
 
-fn draw_history(ui: &mut egui::Ui, history: &[f32; HISTORY_LEN]) {
+fn draw_history(ui: &mut egui::Ui, history: &[(f32, f32); HISTORY_LEN]) {
     let reserved_height = METER_HEIGHT + CONTROL_HEIGHT + ui.spacing().item_spacing.y * 2.0;
     let desired = Vec2::new(
         ui.available_width(),
@@ -143,20 +144,26 @@ fn draw_history(ui: &mut egui::Ui, history: &[f32; HISTORY_LEN]) {
     }
 
     let step = rect.width() / (HISTORY_LEN.saturating_sub(1)) as f32;
-    let mut previous: Option<(Pos2, f32)> = None;
-    for (index, cents) in history.iter().copied().enumerate() {
+    let mut previous: Option<(Pos2, f32, f32)> = None;
+    for (index, (cents, confidence)) in history.iter().copied().enumerate() {
         if cents.is_finite() {
             let point = Pos2::new(
                 rect.left() + step * index as f32,
                 cents_to_y(rect, cents.clamp(-TUNING_RANGE_CENTS, TUNING_RANGE_CENTS)),
             );
-            if let Some((last, last_cents)) = previous {
-                painter.line_segment(
-                    [last, point],
-                    Stroke::new(2.5, line_color_for_cents((last_cents + cents) * 0.5)),
+            if let Some((last, last_cents, last_confidence)) = previous {
+                let segment_confidence = confidence.min(last_confidence);
+                let stroke = Stroke::new(
+                    2.5,
+                    faded_line_color_for_cents((last_cents + cents) * 0.5, segment_confidence),
                 );
+                if segment_confidence < HELD_CONFIDENCE_CUTOFF {
+                    draw_dotted_line(&painter, last, point, stroke);
+                } else {
+                    painter.line_segment([last, point], stroke);
+                }
             }
-            previous = Some((point, cents));
+            previous = Some((point, cents, confidence));
         } else {
             previous = None;
         }
@@ -200,10 +207,17 @@ fn draw_meter(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {
                 .cents
                 .clamp(-TUNING_RANGE_CENTS, TUNING_RANGE_CENTS),
         );
-        painter.line_segment(
-            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            Stroke::new(4.0, line_color_for_cents(snapshot.cents)),
+        let stroke = Stroke::new(
+            4.0,
+            faded_line_color_for_cents(snapshot.cents, snapshot.confidence),
         );
+        let top = Pos2::new(x, rect.top());
+        let bottom = Pos2::new(x, rect.bottom());
+        if snapshot.confidence < HELD_CONFIDENCE_CUTOFF {
+            draw_dotted_line(&painter, top, bottom, stroke);
+        } else {
+            painter.line_segment([top, bottom], stroke);
+        }
     }
 }
 
@@ -321,5 +335,37 @@ fn line_color_for_cents(cents: f32) -> Color32 {
         TuningColor::Green => Color32::from_rgb(83, 232, 145),
         TuningColor::Yellow => Color32::from_rgb(242, 210, 92),
         TuningColor::OrangeRed => Color32::from_rgb(245, 111, 92),
+    }
+}
+
+fn faded_line_color_for_cents(cents: f32, confidence: f32) -> Color32 {
+    let color = line_color_for_cents(cents);
+    let alpha = if confidence >= HELD_CONFIDENCE_CUTOFF {
+        255
+    } else {
+        (70.0 + confidence.max(0.0) / HELD_CONFIDENCE_CUTOFF * 100.0).round() as u8
+    };
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
+fn draw_dotted_line(painter: &egui::Painter, start: Pos2, end: Pos2, stroke: Stroke) {
+    let delta = end - start;
+    let length = delta.length();
+    if length <= 0.0 {
+        return;
+    }
+
+    let direction = delta / length;
+    let mut distance = 0.0;
+    while distance < length {
+        let segment_end = (distance + 3.0).min(length);
+        painter.line_segment(
+            [
+                start + direction * distance,
+                start + direction * segment_end,
+            ],
+            stroke,
+        );
+        distance += 7.0;
     }
 }
