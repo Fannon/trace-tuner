@@ -2,7 +2,7 @@
 
 Trace Tuner is a compact tuner plugin for musicians and producers. It listens to incoming audio, shows the detected pitch and tuning drift, and can emit the detected note as MIDI for simple audio-to-note workflows.
 
-![Trace Tuner screenshot](assets/screenshot.png)
+<p align="center"><img src="assets/screenshot.png" alt="Trace Tuner screenshot" /></p>
 
 ## Features
 
