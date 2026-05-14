@@ -270,9 +270,10 @@ fn draw_controls(ui: &mut egui::Ui, params: &TraceTunerParams, setter: &ParamSet
             &[
                 (DetectionAlgorithm::Yin, "YIN"),
                 (DetectionAlgorithm::Mpm, "MPM"),
+                (DetectionAlgorithm::Pyin, "pYIN"),
                 (DetectionAlgorithm::Acf, "ACF"),
             ],
-            72.0,
+            78.0,
         );
 
         ui.add_space((ui.available_width() - 116.0).max(0.0));

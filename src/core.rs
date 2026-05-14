@@ -1,4 +1,5 @@
-use nih_plug::prelude::Enum;
+use nih_plug::{prelude::Enum, util::permit_alloc};
+use pyin::{Framing, PYINExecutor};
 use std::f32::consts::PI;
 
 pub const MIDI_VELOCITY: f32 = 100.0 / 127.0;
@@ -46,6 +47,9 @@ pub enum DetectionAlgorithm {
     #[id = "mpm"]
     #[name = "MPM"]
     Mpm,
+    #[id = "pyin"]
+    #[name = "pYIN"]
+    Pyin,
     #[id = "acf"]
     #[name = "ACF"]
     Acf,
@@ -205,6 +209,10 @@ pub struct PitchDetector {
     mpm_acf: Vec<f32>,
     mpm_nsdf: Vec<f32>,
 
+    // --- pYIN ---
+    pyin_input: Vec<f64>,
+    pyin_executor: PYINExecutor<f64>,
+
     // --- ACF ---
     acf_windowed: Vec<f32>,
     hann_window: Vec<f32>,
@@ -226,6 +234,8 @@ impl PitchDetector {
             yin_cumulative_mean: vec![0.0; tau_len],
             mpm_acf: vec![0.0; tau_len],
             mpm_nsdf: vec![0.0; tau_len],
+            pyin_input: vec![0.0; max_window_samples],
+            pyin_executor: Self::make_pyin_executor(sample_rate, max_window_samples, 70.0, 1_200.0),
             acf_windowed: vec![0.0; max_window_samples],
             hann_window: Self::make_hann_window(max_window_samples),
         }
@@ -240,6 +250,13 @@ impl PitchDetector {
         self.mpm_acf.resize(tau_len, 0.0);
         self.mpm_nsdf.resize(tau_len, 0.0);
         self.pre_emphasized.resize(max_window_samples, 0.0);
+        self.pyin_input.resize(max_window_samples, 0.0);
+        self.pyin_executor = Self::make_pyin_executor(
+            sample_rate,
+            max_window_samples,
+            self.min_frequency_hz,
+            self.max_frequency_hz,
+        );
         self.acf_windowed.resize(max_window_samples, 0.0);
         self.hann_window.resize(max_window_samples, 0.0);
         self.hann_window = Self::make_hann_window(max_window_samples);
@@ -254,6 +271,7 @@ impl PitchDetector {
         self.yin_cumulative_mean.fill(0.0);
         self.mpm_acf.fill(0.0);
         self.mpm_nsdf.fill(0.0);
+        self.pyin_input.fill(0.0);
     }
 
     fn make_hann_window(n: usize) -> Vec<f32> {
@@ -263,6 +281,23 @@ impl PitchDetector {
         (0..n)
             .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / (n - 1) as f32).cos()))
             .collect()
+    }
+
+    fn make_pyin_executor(
+        sample_rate: f32,
+        frame_length: usize,
+        min_frequency_hz: f32,
+        max_frequency_hz: f32,
+    ) -> PYINExecutor<f64> {
+        PYINExecutor::new(
+            min_frequency_hz as f64,
+            max_frequency_hz as f64,
+            sample_rate.round().max(1.0) as u32,
+            frame_length,
+            None,
+            Some(frame_length),
+            None,
+        )
     }
 
     pub fn set_algorithm(&mut self, algorithm: DetectionAlgorithm) {
@@ -292,6 +327,7 @@ impl PitchDetector {
         let mut estimate = match self.algorithm {
             DetectionAlgorithm::Yin => self.detect_yin(rms, n),
             DetectionAlgorithm::Mpm => self.detect_mpm(rms, n),
+            DetectionAlgorithm::Pyin => self.detect_pyin(rms, n),
             DetectionAlgorithm::Acf => self.detect_acf(rms, n),
         }?;
 
@@ -392,7 +428,19 @@ impl PitchDetector {
             tau += 1;
         }
 
-        None
+        let (fallback_tau, confidence) =
+            yin_fallback_candidate(&self.yin_cumulative_mean, min_tau, max_tau)?;
+        let better_tau = parabolic_interpolation(&self.yin_cumulative_mean, fallback_tau, max_tau);
+        let frequency_hz = self.sample_rate / better_tau;
+        if frequency_hz < self.min_frequency_hz || frequency_hz > self.max_frequency_hz {
+            return None;
+        }
+
+        Some(PitchEstimate {
+            frequency_hz,
+            confidence,
+            rms,
+        })
     }
 
     // ==================================================================
@@ -456,6 +504,49 @@ impl PitchDetector {
             confidence: self.mpm_nsdf[peak_tau].clamp(0.0, 1.0),
             rms,
         })
+    }
+
+    // ==================================================================
+    // pYIN  (probabilistic YIN via the `pyin` crate)
+    //
+    // This is exposed as an experimental comparison mode. The upstream crate
+    // returns ndarray results per call, so unlike the hand-written detectors
+    // this is not a fully allocation-free real-time implementation.
+    // ==================================================================
+    fn detect_pyin(&mut self, rms: f32, n: usize) -> Option<PitchEstimate> {
+        if n < self.window_size {
+            return None;
+        }
+
+        for i in 0..n {
+            self.pyin_input[i] = self.pre_emphasized[i] as f64;
+        }
+
+        let (_timestamps, f0, voiced_flag, voiced_prob) = permit_alloc(|| {
+            self.pyin_executor
+                .pyin(&self.pyin_input[..n], f64::NAN, Framing::Valid)
+        });
+
+        f0.iter()
+            .zip(voiced_flag.iter())
+            .zip(voiced_prob.iter())
+            .rev()
+            .find_map(|((&frequency_hz, &voiced), &probability)| {
+                if !voiced || !frequency_hz.is_finite() {
+                    return None;
+                }
+
+                let frequency_hz = frequency_hz as f32;
+                if frequency_hz < self.min_frequency_hz || frequency_hz > self.max_frequency_hz {
+                    return None;
+                }
+
+                Some(PitchEstimate {
+                    frequency_hz,
+                    confidence: (probability as f32).clamp(0.0, 1.0),
+                    rms,
+                })
+            })
     }
 
     // ==================================================================
@@ -791,6 +882,12 @@ fn rms_confidence_scale(rms: f32) -> f32 {
     }
 }
 
+fn yin_fallback_candidate(values: &[f32], min_tau: usize, max_tau: usize) -> Option<(usize, f32)> {
+    let tau = (min_tau..=max_tau).min_by(|a, b| values[*a].total_cmp(&values[*b]))?;
+    let confidence = (1.0 - values[tau]).clamp(0.0, 1.0);
+    (confidence >= HOLD_CONFIDENCE).then_some((tau, confidence))
+}
+
 fn mpm_pick_peak(nsdf: &[f32], min_tau: usize, max_tau: usize) -> Option<usize> {
     if max_tau <= min_tau + 2 {
         return None;
@@ -976,6 +1073,12 @@ mod tests {
     }
 
     #[test]
+    fn pyin_detects_440hz() {
+        let freq = detect_freq(DetectionAlgorithm::Pyin, 440.0, 48_000.0);
+        assert!((freq - 440.0).abs() < 3.0, "pyin detected: {freq}");
+    }
+
+    #[test]
     fn acf_detects_440hz() {
         let freq = detect_freq(DetectionAlgorithm::Acf, 440.0, 48_000.0);
         assert!((freq - 440.0).abs() < 3.0, "acf detected: {freq}");
@@ -1053,6 +1156,34 @@ mod tests {
     }
 
     #[test]
+    fn pyin_confidence_on_clean_sine() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Pyin);
+        let samples = sine_wave(440.0, 48_000.0, 2_048);
+        let pitch = detector.detect(&samples).unwrap();
+        assert!(pitch.confidence > 0.5);
+    }
+
+    #[test]
+    fn yin_fallback_accepts_best_hold_confidence_candidate() {
+        let mut cmndf = vec![1.0; 12];
+        cmndf[5] = 0.35;
+        cmndf[8] = 0.42;
+
+        let (tau, confidence) = yin_fallback_candidate(&cmndf, 2, 10).unwrap();
+        assert_eq!(tau, 5);
+        assert!((confidence - 0.65).abs() < 0.001);
+    }
+
+    #[test]
+    fn yin_fallback_rejects_weak_best_candidate() {
+        let mut cmndf = vec![1.0; 12];
+        cmndf[5] = 0.45;
+
+        assert_eq!(yin_fallback_candidate(&cmndf, 2, 10), None);
+    }
+
+    #[test]
     fn yin_set_sample_rate_reconfigures_buffers() {
         let mut detector = PitchDetector::new(48_000.0, 2_048);
         detector.set_sample_rate(44_100.0, 1_024);
@@ -1083,6 +1214,7 @@ mod tests {
         let algs = [
             DetectionAlgorithm::Yin,
             DetectionAlgorithm::Mpm,
+            DetectionAlgorithm::Pyin,
             DetectionAlgorithm::Acf,
         ];
         for alg in algs {
@@ -1110,11 +1242,15 @@ mod tests {
         detector.set_algorithm(DetectionAlgorithm::Mpm);
         let mpm = detector.detect(&samples).unwrap();
 
+        detector.set_algorithm(DetectionAlgorithm::Pyin);
+        let pyin = detector.detect(&samples).unwrap();
+
         detector.set_algorithm(DetectionAlgorithm::Acf);
         let acf = detector.detect(&samples).unwrap();
 
         assert!((yin.frequency_hz - 440.0).abs() < 1.0);
         assert!((mpm.frequency_hz - 440.0).abs() < 2.0);
+        assert!((pyin.frequency_hz - 440.0).abs() < 3.0);
         assert!((acf.frequency_hz - 440.0).abs() < 3.0);
     }
 

@@ -24,6 +24,7 @@ rt-alloc-check = ["nih_plug/assert_process_allocs"]
 atomic_float = "1"
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git", optional = true }
+pyin = "1.2.0"
 serde = { version = "1", features = ["derive"] }
 
 [profile.release]

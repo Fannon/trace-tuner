@@ -9,6 +9,7 @@ Trace Tuner is a compact tuner plugin for musicians and producers. It listens to
 - Real-time monophonic pitch detection for guitar, voice, and other clear single-note sources
 - Chromatic tuning mode plus a guitar-string target mode
 - Stable and Fast response modes
+- Switchable pitch detectors: YIN, MPM, pYIN, and ACF
 - Tuning history graph and fine-tune meter
 - A4 reference pitch from 430 Hz to 450 Hz
 - Audio passthrough: the plugin does not alter the incoming signal
@@ -31,6 +32,7 @@ Trace Tuner is intended for modern DAWs that support CLAP or VST3 audio effects.
 - Use `Guitar` when you want the display to snap to standard guitar string targets.
 - Use `Stable` for sustained tuning checks. It smooths the display and holds through short confidence dropouts as a note rings out.
 - Use `Fast` for faster tracking of bends, vibrato, slides, and quick note changes. It reacts sooner, but can jump more on ambiguous input.
+- Use `YIN` as the default detector, `MPM` for a harmonic-rich musical comparison, `pYIN` as an experimental probabilistic YIN comparison, and `ACF` as a simple autocorrelation baseline.
 - Adjust `A4` if your session or instrument uses a reference other than 440 Hz.
 
 The green zone represents roughly +/-10 cents. +/-5 cents is very tight; +/-10 cents is commonly acceptable for practical tuning, depending on instrument and context.
@@ -56,6 +58,7 @@ Known limitations:
 - Fixed-size editor for now
 - No built-in calibration workflow beyond the A4 parameter
 - Tuning confidence depends strongly on input level, background noise, and note sustain
+- The pYIN detector is useful for comparison, but the current crate-based implementation allocates during detection and is heavier than the hand-written YIN, MPM, and ACF detectors.
 
 Trace Tuner was developed with AI assistance. Code, behavior, and release artifacts are still reviewed and maintained by the project author.
 
@@ -94,3 +97,14 @@ cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+## Credits
+
+Trace Tuner is built with:
+
+- [NIH-plug](https://github.com/robbert-vdh/nih-plug) for CLAP/VST3 plugin infrastructure.
+- [nih-plug-egui](https://github.com/robbert-vdh/nih-plug) and egui for the editor UI.
+- [atomic_float](https://crates.io/crates/atomic_float) for lock-free audio-to-UI state sharing.
+- [pyin](https://github.com/Sytronik/pyin-rs), based on librosa's pYIN implementation, for the experimental pYIN detector.
+
+The included YIN, MPM, and ACF implementations are maintained in this repository. pYIN is based on Mauch and Dixon, "pYIN: A fundamental frequency estimator using probabilistic threshold distributions", 2014.
