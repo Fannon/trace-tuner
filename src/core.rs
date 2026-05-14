@@ -661,4 +661,225 @@ mod tests {
         assert!((pitch.frequency_hz - 440.0).abs() < 1.0);
         assert!(pitch.confidence > 0.8);
     }
+
+    #[test]
+    fn yin_rejects_silence() {
+        let mut detector = YinDetector::new(48_000.0, 2_048);
+        let samples = [0.0; 2_048];
+        assert!(detector.detect(&samples).is_none());
+    }
+
+    #[test]
+    fn yin_rejects_short_buffer() {
+        let mut detector = YinDetector::new(48_000.0, 2_048);
+        assert!(detector.detect(&[0.5; 16]).is_none());
+    }
+
+    #[test]
+    fn yin_detects_high_frequency() {
+        let sample_rate = 48_000.0;
+        let mut detector = YinDetector::new(sample_rate, 2_048);
+        let mut samples = [0.0; 2_048];
+        for (index, sample) in samples.iter_mut().enumerate() {
+            *sample = (TAU * 1_000.0 * index as f32 / sample_rate).sin() * 0.4;
+        }
+        let pitch = detector.detect(&samples).unwrap();
+        assert!((pitch.frequency_hz - 1_000.0).abs() < 5.0);
+        assert!(pitch.confidence > 0.7);
+    }
+
+    #[test]
+    fn yin_set_sample_rate_reconfigures_buffers() {
+        let mut detector = YinDetector::new(48_000.0, 2_048);
+        detector.set_sample_rate(44_100.0, 1_024);
+        let samples = vec![0.0; 1_024];
+        assert!(detector.detect(&samples).is_none());
+    }
+
+    #[test]
+    fn chromatic_with_non_440_reference() {
+        let matched = chromatic_note_match(445.0, 445.0).unwrap();
+        assert_eq!(matched.midi_note, 69);
+        assert!(matched.cents.abs() < 0.01);
+
+        let a3 = chromatic_note_match(222.5, 445.0).unwrap();
+        assert_eq!(a3.midi_note, 57);
+        assert_eq!(midi_note_name(a3.midi_note), "A3");
+    }
+
+    #[test]
+    fn chromatic_rejects_zero_or_negative_frequency() {
+        assert!(chromatic_note_match(0.0, 440.0).is_none());
+        assert!(chromatic_note_match(-10.0, 440.0).is_none());
+        assert!(chromatic_note_match(440.0, 0.0).is_none());
+        assert!(chromatic_note_match(440.0, -1.0).is_none());
+    }
+
+    #[test]
+    fn guitar_rejects_zero_or_negative_frequency() {
+        assert!(guitar_note_match(0.0, 440.0).is_none());
+        assert!(guitar_note_match(440.0, -1.0).is_none());
+    }
+
+    #[test]
+    fn tuning_color_exact_boundaries() {
+        assert_eq!(tuning_color(5.0), TuningColor::Green);
+        assert_eq!(tuning_color(-5.0), TuningColor::Green);
+        assert_eq!(tuning_color(5.01), TuningColor::Yellow);
+        assert_eq!(tuning_color(15.0), TuningColor::Yellow);
+        assert_eq!(tuning_color(-15.0), TuningColor::Yellow);
+        assert_eq!(tuning_color(15.01), TuningColor::OrangeRed);
+    }
+
+    #[test]
+    fn midi_note_name_coverage() {
+        assert_eq!(midi_note_name(60), "C4");
+        assert_eq!(midi_note_name(61), "C#4");
+        assert_eq!(midi_note_name(56), "G#3");
+        assert_eq!(midi_note_name(59), "B3");
+        assert_eq!(midi_note_name(64), "E4");
+        assert_eq!(midi_note_name(0), "C-1");
+        assert_eq!(midi_note_name(127), "G9");
+    }
+
+    #[test]
+    fn cents_between_unison_and_octave() {
+        assert!((cents_between(440.0, 440.0)).abs() < 0.001);
+        assert!((cents_between(880.0, 440.0) - 1_200.0).abs() < 0.01);
+        assert!((cents_between(220.0, 440.0) + 1_200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn map_frequency_dispatches_by_mode() {
+        let chromatic = map_frequency(440.0, 440.0, TunerMode::Chromatic).unwrap();
+        assert_eq!(chromatic.midi_note, 69);
+
+        let guitar = map_frequency(111.0, 440.0, TunerMode::Guitar).unwrap();
+        assert_eq!(guitar.midi_note, 45);
+        assert_eq!(midi_note_name(guitar.midi_note), "A2");
+    }
+
+    #[test]
+    fn guitar_mode_exact_midpoint() {
+        let midpoint = 123.47;
+        let matched = guitar_note_match(midpoint, 440.0).unwrap();
+        assert!(matched.midi_note == 45 || matched.midi_note == 50);
+        assert!((midi_note_name(matched.midi_note) == "A2") || (midi_note_name(matched.midi_note) == "D3"));
+    }
+
+    #[test]
+    fn fast_display_holds_through_brief_missing() {
+        let mut fast = ResponseSmoother::new(ResponseMode::Fast);
+        fast.update(Some(active_snapshot(69, 0.0)));
+
+        for _ in 0..(FAST_DISPLAY_HOLD_FRAMES - 1) {
+            let held = fast.update(None);
+            assert!(held.active);
+            assert_eq!(held.midi_note, 69);
+        }
+
+        assert!(!fast.update(None).active);
+    }
+
+    #[test]
+    fn smoother_mode_switch_resets_candidate() {
+        let mut smoother = ResponseSmoother::new(ResponseMode::Stable);
+        smoother.update(Some(active_snapshot(69, 0.0)));
+
+        smoother.update(Some(active_snapshot(71, 0.0)));
+        assert_eq!(smoother.update(Some(active_snapshot(71, 0.0))).midi_note, 69);
+
+        smoother.set_mode(ResponseMode::Fast);
+        let result = smoother.update(Some(active_snapshot(71, 0.0)));
+        assert_eq!(result.midi_note, 71);
+    }
+
+    #[test]
+    fn smoother_reset_forces_new_acquisition() {
+        let mut smoother = ResponseSmoother::new(ResponseMode::Stable);
+        smoother.update(Some(active_snapshot(69, 0.0)));
+        assert_eq!(smoother.update(Some(active_snapshot(69, 5.0))).midi_note, 69);
+
+        smoother.reset();
+        let after_reset = smoother.update(Some(active_snapshot(71, 10.0)));
+        assert!(after_reset.active);
+        assert_eq!(after_reset.midi_note, 71);
+    }
+
+    #[test]
+    fn fast_mode_rejects_moderate_confidence() {
+        let mut fast = ResponseSmoother::new(ResponseMode::Fast);
+        fast.update(Some(active_snapshot(69, 0.0)));
+
+        let result = fast.update(Some(active_snapshot_with_confidence(69, 12.0, 0.65)));
+        assert!(result.active);
+        assert_eq!(result.midi_note, 69);
+        assert!(result.confidence < 0.65);
+    }
+
+    #[test]
+    fn midi_stable_requires_three_confirmations() {
+        let mut midi = MidiState::new(48_000.0);
+        let a4 = active_snapshot(69, 0.0);
+        let b4 = active_snapshot(71, 0.0);
+
+        assert_eq!(midi.update(Some(a4), ResponseMode::Stable, 512), MidiDecision::None);
+        assert_eq!(midi.update(Some(a4), ResponseMode::Stable, 512), MidiDecision::None);
+        assert_eq!(
+            midi.update(Some(a4), ResponseMode::Stable, 512),
+            MidiDecision::NoteOn { note: 69, velocity: MIDI_VELOCITY }
+        );
+
+        assert_eq!(midi.update(Some(b4), ResponseMode::Stable, 512), MidiDecision::None);
+        assert_eq!(
+            midi.update(Some(b4), ResponseMode::Stable, 512),
+            MidiDecision::None
+        );
+        assert_eq!(
+            midi.update(Some(b4), ResponseMode::Stable, 512),
+            MidiDecision::NoteChange { off: 69, on: 71, velocity: MIDI_VELOCITY }
+        );
+    }
+
+    #[test]
+    fn midi_same_note_stays_idle() {
+        let mut midi = MidiState::new(48_000.0);
+        let a4 = active_snapshot(69, 0.0);
+
+        assert_eq!(
+            midi.update(Some(a4), ResponseMode::Fast, 128),
+            MidiDecision::NoteOn { note: 69, velocity: MIDI_VELOCITY }
+        );
+        assert_eq!(midi.update(Some(a4), ResponseMode::Fast, 128), MidiDecision::None);
+        assert_eq!(midi.update(Some(a4), ResponseMode::Fast, 128), MidiDecision::None);
+    }
+
+    #[test]
+    fn midi_reset_clears_state() {
+        let mut midi = MidiState::new(48_000.0);
+        midi.update(Some(active_snapshot(69, 0.0)), ResponseMode::Fast, 128);
+
+        midi.reset();
+        assert_eq!(
+            midi.update(Some(active_snapshot(69, 0.0)), ResponseMode::Fast, 128),
+            MidiDecision::NoteOn { note: 69, velocity: MIDI_VELOCITY }
+        );
+    }
+
+    #[test]
+    fn midi_silence_below_timeout_returns_none() {
+        let mut midi = MidiState::new(48_000.0);
+        midi.update(Some(active_snapshot(69, 0.0)), ResponseMode::Fast, 128);
+
+        let timeout = silence_timeout_samples(48_000.0);
+        assert_eq!(midi.update(None, ResponseMode::Fast, timeout / 2), MidiDecision::None);
+        assert_eq!(midi.update(None, ResponseMode::Fast, timeout / 2 - 1), MidiDecision::None);
+    }
+
+    #[test]
+    fn silence_timeout_different_sample_rates() {
+        let timeout_48k = silence_timeout_samples(48_000.0);
+        let timeout_96k = silence_timeout_samples(96_000.0);
+        assert_eq!(timeout_96k, timeout_48k * 2);
+    }
 }
