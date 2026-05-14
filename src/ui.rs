@@ -195,13 +195,19 @@ fn draw_meter(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {
 }
 
 fn draw_controls(ui: &mut egui::Ui, params: &TraceTunerParams, setter: &ParamSetter) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Mode").color(MUTED));
-        ui.add(widgets::ParamSlider::for_param(&params.mode, setter).with_width(96.0));
-        ui.label(RichText::new("Response").color(MUTED));
-        ui.add(widgets::ParamSlider::for_param(&params.response, setter).with_width(104.0));
-        ui.label(RichText::new("A4").color(MUTED));
-        ui.add(widgets::ParamSlider::for_param(&params.reference_pitch, setter).with_width(88.0));
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Mode").color(MUTED));
+            ui.add(widgets::ParamSlider::for_param(&params.mode, setter).with_width(96.0));
+            ui.label(RichText::new("Response").color(MUTED));
+            ui.add(widgets::ParamSlider::for_param(&params.response, setter).with_width(104.0));
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("A4").color(MUTED));
+            ui.add(
+                widgets::ParamSlider::for_param(&params.reference_pitch, setter).with_width(120.0),
+            );
+        });
     });
 }
 
