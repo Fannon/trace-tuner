@@ -764,7 +764,10 @@ mod tests {
         let midpoint = 123.47;
         let matched = guitar_note_match(midpoint, 440.0).unwrap();
         assert!(matched.midi_note == 45 || matched.midi_note == 50);
-        assert!((midi_note_name(matched.midi_note) == "A2") || (midi_note_name(matched.midi_note) == "D3"));
+        assert!(
+            (midi_note_name(matched.midi_note) == "A2")
+                || (midi_note_name(matched.midi_note) == "D3")
+        );
     }
 
     #[test]
@@ -787,7 +790,10 @@ mod tests {
         smoother.update(Some(active_snapshot(69, 0.0)));
 
         smoother.update(Some(active_snapshot(71, 0.0)));
-        assert_eq!(smoother.update(Some(active_snapshot(71, 0.0))).midi_note, 69);
+        assert_eq!(
+            smoother.update(Some(active_snapshot(71, 0.0))).midi_note,
+            69
+        );
 
         smoother.set_mode(ResponseMode::Fast);
         let result = smoother.update(Some(active_snapshot(71, 0.0)));
@@ -798,7 +804,10 @@ mod tests {
     fn smoother_reset_forces_new_acquisition() {
         let mut smoother = ResponseSmoother::new(ResponseMode::Stable);
         smoother.update(Some(active_snapshot(69, 0.0)));
-        assert_eq!(smoother.update(Some(active_snapshot(69, 5.0))).midi_note, 69);
+        assert_eq!(
+            smoother.update(Some(active_snapshot(69, 5.0))).midi_note,
+            69
+        );
 
         smoother.reset();
         let after_reset = smoother.update(Some(active_snapshot(71, 10.0)));
@@ -823,21 +832,37 @@ mod tests {
         let a4 = active_snapshot(69, 0.0);
         let b4 = active_snapshot(71, 0.0);
 
-        assert_eq!(midi.update(Some(a4), ResponseMode::Stable, 512), MidiDecision::None);
-        assert_eq!(midi.update(Some(a4), ResponseMode::Stable, 512), MidiDecision::None);
         assert_eq!(
             midi.update(Some(a4), ResponseMode::Stable, 512),
-            MidiDecision::NoteOn { note: 69, velocity: MIDI_VELOCITY }
+            MidiDecision::None
+        );
+        assert_eq!(
+            midi.update(Some(a4), ResponseMode::Stable, 512),
+            MidiDecision::None
+        );
+        assert_eq!(
+            midi.update(Some(a4), ResponseMode::Stable, 512),
+            MidiDecision::NoteOn {
+                note: 69,
+                velocity: MIDI_VELOCITY
+            }
         );
 
-        assert_eq!(midi.update(Some(b4), ResponseMode::Stable, 512), MidiDecision::None);
         assert_eq!(
             midi.update(Some(b4), ResponseMode::Stable, 512),
             MidiDecision::None
         );
         assert_eq!(
             midi.update(Some(b4), ResponseMode::Stable, 512),
-            MidiDecision::NoteChange { off: 69, on: 71, velocity: MIDI_VELOCITY }
+            MidiDecision::None
+        );
+        assert_eq!(
+            midi.update(Some(b4), ResponseMode::Stable, 512),
+            MidiDecision::NoteChange {
+                off: 69,
+                on: 71,
+                velocity: MIDI_VELOCITY
+            }
         );
     }
 
@@ -848,10 +873,19 @@ mod tests {
 
         assert_eq!(
             midi.update(Some(a4), ResponseMode::Fast, 128),
-            MidiDecision::NoteOn { note: 69, velocity: MIDI_VELOCITY }
+            MidiDecision::NoteOn {
+                note: 69,
+                velocity: MIDI_VELOCITY
+            }
         );
-        assert_eq!(midi.update(Some(a4), ResponseMode::Fast, 128), MidiDecision::None);
-        assert_eq!(midi.update(Some(a4), ResponseMode::Fast, 128), MidiDecision::None);
+        assert_eq!(
+            midi.update(Some(a4), ResponseMode::Fast, 128),
+            MidiDecision::None
+        );
+        assert_eq!(
+            midi.update(Some(a4), ResponseMode::Fast, 128),
+            MidiDecision::None
+        );
     }
 
     #[test]
@@ -862,7 +896,10 @@ mod tests {
         midi.reset();
         assert_eq!(
             midi.update(Some(active_snapshot(69, 0.0)), ResponseMode::Fast, 128),
-            MidiDecision::NoteOn { note: 69, velocity: MIDI_VELOCITY }
+            MidiDecision::NoteOn {
+                note: 69,
+                velocity: MIDI_VELOCITY
+            }
         );
     }
 
@@ -872,8 +909,14 @@ mod tests {
         midi.update(Some(active_snapshot(69, 0.0)), ResponseMode::Fast, 128);
 
         let timeout = silence_timeout_samples(48_000.0);
-        assert_eq!(midi.update(None, ResponseMode::Fast, timeout / 2), MidiDecision::None);
-        assert_eq!(midi.update(None, ResponseMode::Fast, timeout / 2 - 1), MidiDecision::None);
+        assert_eq!(
+            midi.update(None, ResponseMode::Fast, timeout / 2),
+            MidiDecision::None
+        );
+        assert_eq!(
+            midi.update(None, ResponseMode::Fast, timeout / 2 - 1),
+            MidiDecision::None
+        );
     }
 
     #[test]

@@ -161,7 +161,7 @@ impl Default for TraceTunerParams {
     fn default() -> Self {
         Self {
             #[cfg(feature = "gui")]
-            editor_state: EguiState::from_size(430, 255),
+            editor_state: EguiState::from_size(430, 300),
             mode: EnumParam::new("Mode", TunerMode::Chromatic),
             response: EnumParam::new("Response", ResponseMode::Stable),
             reference_pitch: FloatParam::new(
@@ -297,7 +297,8 @@ impl Plugin for TraceTuner {
 
                 let smoothed = self.smoother.update(detected);
                 self.shared_state.publish(smoothed);
-                let detection = detected.filter(|snapshot| snapshot.confidence >= ACQUIRE_CONFIDENCE);
+                let detection =
+                    detected.filter(|snapshot| snapshot.confidence >= ACQUIRE_CONFIDENCE);
                 let decision = self.midi_state.update(detection, response, elapsed_samples);
                 self.emit_midi(context, decision, sample_index as u32);
             }

@@ -46,7 +46,7 @@ pub fn create_editor(
             CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(BG))
                 .show(egui_ctx, |ui| {
-                    ui.set_min_size(Vec2::new(430.0, 285.0));
+                    ui.set_min_size(Vec2::new(430.0, 300.0));
                     ui.spacing_mut().item_spacing = Vec2::new(8.0, 5.0);
 
                     let snapshot = shared_state.snapshot();
@@ -331,7 +331,6 @@ fn line_color_for_cents(cents: f32) -> Color32 {
 
 fn faded_line_color_for_cents(cents: f32, confidence: f32) -> Color32 {
     let color = line_color_for_cents(cents);
-    let alpha = (30.0 + confidence.max(0.0).min(1.0).powf(0.6) * 225.0).round() as u8;
+    let alpha = (30.0 + confidence.clamp(0.0, 1.0).powf(0.6) * 225.0).round() as u8;
     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
 }
-
