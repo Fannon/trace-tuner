@@ -220,9 +220,7 @@ impl YinDetector {
         let mut tau = min_tau;
         while tau <= max_tau {
             if self.cumulative_mean[tau] < self.threshold {
-                while tau + 1 <= max_tau
-                    && self.cumulative_mean[tau + 1] < self.cumulative_mean[tau]
-                {
+                while tau < max_tau && self.cumulative_mean[tau + 1] < self.cumulative_mean[tau] {
                     tau += 1;
                 }
 
@@ -274,7 +272,7 @@ impl ResponseSmoother {
     }
 
     pub fn update(&mut self, next: Option<DetectionSnapshot>) -> DetectionSnapshot {
-        let Some(mut next) = next else {
+        let Some(next) = next else {
             self.current = DetectionSnapshot::idle();
             self.candidate_note = None;
             self.candidate_count = 0;
@@ -300,9 +298,6 @@ impl ResponseSmoother {
 
         if self.candidate_count >= required {
             self.accept(next);
-        } else {
-            next = self.current;
-            self.current = next;
         }
 
         self.current

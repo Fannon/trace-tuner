@@ -15,11 +15,12 @@ homepage = "https://github.com/Fannon/trace-tuner"
 crate-type = ["cdylib", "lib"]
 
 [features]
-default = []
+default = ["rt-alloc-check"]
 gui = ["dep:nih_plug_egui"]
+rt-alloc-check = ["nih_plug/assert_process_allocs"]
 
 [dependencies]
 atomic_float = "1"
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git", optional = true }
 serde = { version = "1", features = ["derive"] }
