@@ -39,7 +39,7 @@ echo Build complete! Plugins are located in the bin/ directory.
 echo Creating timestamped release in tmp/...
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set dt=%%i
 set dir=tmp\release_%dt%
-if not exist %dir% mkdir %dir%
+if not exist "%dir%" mkdir "%dir%"
 if exist "%dir%\TraceTuner.vst3" rmdir /S /Q "%dir%\TraceTuner.vst3"
 xcopy "target\bundled\TraceTuner.vst3" "%dir%\TraceTuner.vst3\" /E /I /Y >nul
 if errorlevel 1 exit /b %errorlevel%

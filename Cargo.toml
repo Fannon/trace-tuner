@@ -10,6 +10,7 @@ authors = ["Simon Heimler"]
 license = "MIT"
 description = "A minimal CLAP/VST3 tuner plugin with MIDI note output"
 homepage = "https://github.com/Fannon/trace-tuner"
+repository = "https://github.com/Fannon/trace-tuner"
 
 [lib]
 crate-type = ["cdylib", "lib"]

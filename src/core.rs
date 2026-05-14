@@ -3,8 +3,8 @@ use nih_plug::prelude::Enum;
 pub const MIDI_VELOCITY: f32 = 100.0 / 127.0;
 pub const SILENCE_TIMEOUT_MS: f32 = 120.0;
 
-const ACQUIRE_CONFIDENCE: f32 = 0.80;
-const HOLD_CONFIDENCE: f32 = 0.60;
+pub(crate) const ACQUIRE_CONFIDENCE: f32 = 0.80;
+pub(crate) const HOLD_CONFIDENCE: f32 = 0.60;
 const STABLE_DISPLAY_HOLD_FRAMES: u8 = 96;
 const FAST_DISPLAY_HOLD_FRAMES: u8 = 12;
 

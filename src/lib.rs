@@ -13,7 +13,7 @@ mod ui;
 
 use core::{
     map_frequency, DetectionSnapshot, MidiDecision, MidiState, ResponseMode, ResponseSmoother,
-    TunerMode, YinDetector,
+    TunerMode, YinDetector, ACQUIRE_CONFIDENCE,
 };
 
 const ANALYSIS_WINDOW_SAMPLES: usize = 2_048;
@@ -297,7 +297,7 @@ impl Plugin for TraceTuner {
 
                 let smoothed = self.smoother.update(detected);
                 self.shared_state.publish(smoothed);
-                let detection = detected.filter(|snapshot| snapshot.confidence >= 0.80);
+                let detection = detected.filter(|snapshot| snapshot.confidence >= ACQUIRE_CONFIDENCE);
                 let decision = self.midi_state.update(detection, response, elapsed_samples);
                 self.emit_midi(context, decision, sample_index as u32);
             }
