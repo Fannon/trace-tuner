@@ -1,0 +1,25 @@
+[workspace]
+members = [".", "xtask"]
+resolver = "2"
+
+[package]
+name = "trace_tuner"
+version = "0.1.0"
+edition = "2021"
+authors = ["Simon Heimler"]
+license = "MIT"
+description = "A minimal CLAP/VST3 tuner plugin with MIDI note output"
+homepage = "https://github.com/Fannon/trace-tuner"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+gui = ["dep:nih_plug_egui"]
+
+[dependencies]
+atomic_float = "1"
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git", optional = true }
+serde = { version = "1", features = ["derive"] }
