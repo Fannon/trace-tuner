@@ -18,10 +18,9 @@ const GRID: Color32 = Color32::from_rgb(52, 58, 66);
 const TEXT: Color32 = Color32::from_rgb(226, 230, 235);
 const MUTED: Color32 = Color32::from_rgb(116, 124, 134);
 const BLUE: Color32 = Color32::from_rgb(82, 145, 255);
-const TUNING_RANGE_CENTS: f32 = 35.0;
+const TUNING_RANGE_CENTS: f32 = 50.0;
 const IN_TUNE_CENTS: f32 = 10.0;
-const HELD_CONFIDENCE_CUTOFF: f32 = 0.60;
-const HISTORY_MIN_HEIGHT: f32 = 112.0;
+const HISTORY_MIN_HEIGHT: f32 = 142.0;
 const METER_HEIGHT: f32 = 22.0;
 const CONTROL_HEIGHT: f32 = 24.0;
 
@@ -47,7 +46,7 @@ pub fn create_editor(
             CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(BG))
                 .show(egui_ctx, |ui| {
-                    ui.set_min_size(Vec2::new(430.0, 255.0));
+                    ui.set_min_size(Vec2::new(430.0, 285.0));
                     ui.spacing_mut().item_spacing = Vec2::new(8.0, 5.0);
 
                     let snapshot = shared_state.snapshot();
@@ -130,7 +129,7 @@ fn draw_history(ui: &mut egui::Ui, history: &[(f32, f32); HISTORY_LEN]) {
         Color32::from_rgba_unmultiplied(51, 188, 116, 18),
     );
 
-    for cents in [-35.0_f32, -20.0, -10.0, 0.0, 10.0, 20.0, 35.0] {
+    for cents in [-50.0_f32, -25.0, -10.0, 0.0, 10.0, 25.0, 50.0] {
         let y = cents_to_y(rect, cents);
         let stroke = if cents == 0.0 {
             Stroke::new(1.5, Color32::from_rgb(92, 102, 113))
@@ -157,11 +156,7 @@ fn draw_history(ui: &mut egui::Ui, history: &[(f32, f32); HISTORY_LEN]) {
                     2.5,
                     faded_line_color_for_cents((last_cents + cents) * 0.5, segment_confidence),
                 );
-                if segment_confidence < HELD_CONFIDENCE_CUTOFF {
-                    draw_dotted_line(&painter, last, point, stroke);
-                } else {
-                    painter.line_segment([last, point], stroke);
-                }
+                painter.line_segment([last, point], stroke);
             }
             previous = Some((point, cents, confidence));
         } else {
@@ -187,7 +182,7 @@ fn draw_meter(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {
         Color32::from_rgba_unmultiplied(51, 188, 116, 24),
     );
 
-    for cents in [-35.0_f32, -20.0, -10.0, 0.0, 10.0, 20.0, 35.0] {
+    for cents in [-50.0_f32, -25.0, -10.0, 0.0, 10.0, 25.0, 50.0] {
         let x = cents_to_x(rect, cents);
         let stroke = if cents == 0.0 {
             Stroke::new(1.5, Color32::from_rgb(128, 138, 148))
@@ -213,11 +208,7 @@ fn draw_meter(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {
         );
         let top = Pos2::new(x, rect.top());
         let bottom = Pos2::new(x, rect.bottom());
-        if snapshot.confidence < HELD_CONFIDENCE_CUTOFF {
-            draw_dotted_line(&painter, top, bottom, stroke);
-        } else {
-            painter.line_segment([top, bottom], stroke);
-        }
+        painter.line_segment([top, bottom], stroke);
     }
 }
 
@@ -340,32 +331,7 @@ fn line_color_for_cents(cents: f32) -> Color32 {
 
 fn faded_line_color_for_cents(cents: f32, confidence: f32) -> Color32 {
     let color = line_color_for_cents(cents);
-    let alpha = if confidence >= HELD_CONFIDENCE_CUTOFF {
-        255
-    } else {
-        (70.0 + confidence.max(0.0) / HELD_CONFIDENCE_CUTOFF * 100.0).round() as u8
-    };
+    let alpha = (30.0 + confidence.max(0.0).min(1.0).powf(0.6) * 225.0).round() as u8;
     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
 }
 
-fn draw_dotted_line(painter: &egui::Painter, start: Pos2, end: Pos2, stroke: Stroke) {
-    let delta = end - start;
-    let length = delta.length();
-    if length <= 0.0 {
-        return;
-    }
-
-    let direction = delta / length;
-    let mut distance = 0.0;
-    while distance < length {
-        let segment_end = (distance + 3.0).min(length);
-        painter.line_segment(
-            [
-                start + direction * distance,
-                start + direction * segment_end,
-            ],
-            stroke,
-        );
-        distance += 7.0;
-    }
-}
