@@ -12,8 +12,8 @@ pub mod core;
 mod ui;
 
 use core::{
-    map_frequency, DetectionSnapshot, MidiDecision, MidiState, ResponseMode, ResponseSmoother,
-    TunerMode, YinDetector, ACQUIRE_CONFIDENCE,
+    map_frequency, DetectionAlgorithm, DetectionSnapshot, MidiDecision, MidiState, PitchDetector,
+    ResponseMode, ResponseSmoother, TunerMode, ACQUIRE_CONFIDENCE,
 };
 
 const ANALYSIS_WINDOW_SAMPLES: usize = 2_048;
@@ -22,7 +22,7 @@ pub const HISTORY_LEN: usize = 160;
 
 pub struct TraceTuner {
     params: Arc<TraceTunerParams>,
-    detector: YinDetector,
+    detector: PitchDetector,
     smoother: ResponseSmoother,
     midi_state: MidiState,
     analysis_window: Vec<f32>,
@@ -39,6 +39,9 @@ pub struct TraceTunerParams {
     #[cfg(feature = "gui")]
     #[persist = "editor-state"]
     editor_state: Arc<EguiState>,
+
+    #[id = "algorithm"]
+    pub algorithm: EnumParam<DetectionAlgorithm>,
 
     #[id = "mode"]
     pub mode: EnumParam<TunerMode>,
@@ -143,7 +146,7 @@ impl Default for TraceTuner {
         let sample_rate = 48_000.0;
         Self {
             params: Arc::new(TraceTunerParams::default()),
-            detector: YinDetector::new(sample_rate, ANALYSIS_WINDOW_SAMPLES),
+            detector: PitchDetector::new(sample_rate, ANALYSIS_WINDOW_SAMPLES),
             smoother: ResponseSmoother::new(ResponseMode::Stable),
             midi_state: MidiState::new(sample_rate),
             analysis_window: vec![0.0; ANALYSIS_WINDOW_SAMPLES],
@@ -162,6 +165,7 @@ impl Default for TraceTunerParams {
         Self {
             #[cfg(feature = "gui")]
             editor_state: EguiState::from_size(430, 300),
+            algorithm: EnumParam::new("Algorithm", DetectionAlgorithm::Yin),
             mode: EnumParam::new("Mode", TunerMode::Chromatic),
             response: EnumParam::new("Response", ResponseMode::Stable),
             reference_pitch: FloatParam::new(
@@ -238,6 +242,7 @@ impl Plugin for TraceTuner {
         self.samples_since_analysis = 0;
         self.smoother.reset();
         self.midi_state.reset();
+        self.detector.reset();
         self.shared_state.publish(DetectionSnapshot::idle());
     }
 
@@ -257,6 +262,7 @@ impl Plugin for TraceTuner {
         let response = self.params.response.value();
         let reference_pitch_hz = self.params.reference_pitch.value();
         self.smoother.set_mode(response);
+        self.detector.set_algorithm(self.params.algorithm.value());
 
         let channels = buffer.as_slice_immutable();
         for sample_index in 0..sample_count {

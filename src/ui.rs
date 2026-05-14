@@ -1,5 +1,8 @@
 use crate::{
-    core::{midi_note_name, tuning_color, DetectionSnapshot, ResponseMode, TunerMode, TuningColor},
+    core::{
+        midi_note_name, tuning_color, DetectionAlgorithm, DetectionSnapshot, ResponseMode,
+        TunerMode, TuningColor,
+    },
     SharedTunerState, TraceTunerParams, HISTORY_LEN,
 };
 use nih_plug::prelude::{Editor, ParamSetter};
@@ -239,6 +242,17 @@ fn draw_controls(ui: &mut egui::Ui, params: &TraceTunerParams, setter: &ParamSet
                 width: 82.0,
             },
         );
+        cycle_button(
+            ui,
+            setter,
+            &params.algorithm,
+            &[
+                (DetectionAlgorithm::Yin, "YIN"),
+                (DetectionAlgorithm::Mpm, "MPM"),
+                (DetectionAlgorithm::Acf, "ACF"),
+            ],
+            72.0,
+        );
 
         ui.add_space((ui.available_width() - 116.0).max(0.0));
         step_button(ui, setter, params, -0.1, "-");
@@ -281,6 +295,39 @@ fn toggle_button<T>(
         )
         .clicked()
     {
+        setter.begin_set_parameter(param);
+        setter.set_parameter(param, next);
+        setter.end_set_parameter(param);
+    }
+}
+
+fn cycle_button<T>(
+    ui: &mut egui::Ui,
+    setter: &ParamSetter,
+    param: &nih_plug::prelude::EnumParam<T>,
+    variants: &[(T, &str)],
+    width: f32,
+) where
+    T: nih_plug::prelude::Enum + Copy + PartialEq + 'static,
+{
+    let current = param.value();
+    let label = variants
+        .iter()
+        .find_map(|(v, label)| if *v == current { Some(*label) } else { None })
+        .unwrap_or("?");
+
+    if ui
+        .add_sized(
+            [width, CONTROL_HEIGHT],
+            egui::Button::new(label).fill(Color32::from_rgb(42, 46, 52)),
+        )
+        .clicked()
+    {
+        let idx = variants
+            .iter()
+            .position(|(v, _)| *v == current)
+            .unwrap_or(0);
+        let next = variants[(idx + 1) % variants.len()].0;
         setter.begin_set_parameter(param);
         setter.set_parameter(param, next);
         setter.end_set_parameter(param);

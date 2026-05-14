@@ -1,4 +1,5 @@
 use nih_plug::prelude::Enum;
+use std::f32::consts::PI;
 
 pub const MIDI_VELOCITY: f32 = 100.0 / 127.0;
 pub const SILENCE_TIMEOUT_MS: f32 = 120.0;
@@ -7,6 +8,8 @@ pub(crate) const ACQUIRE_CONFIDENCE: f32 = 0.80;
 pub(crate) const HOLD_CONFIDENCE: f32 = 0.60;
 const STABLE_DISPLAY_HOLD_FRAMES: u8 = 96;
 const FAST_DISPLAY_HOLD_FRAMES: u8 = 12;
+
+const PRE_EMPHASIS_ALPHA: f32 = 0.30;
 
 const NOTE_NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
@@ -27,6 +30,19 @@ pub enum ResponseMode {
     Stable,
     #[id = "fast"]
     Fast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum DetectionAlgorithm {
+    #[id = "yin"]
+    #[name = "YIN"]
+    Yin,
+    #[id = "mpm"]
+    #[name = "MPM"]
+    Mpm,
+    #[id = "acf"]
+    #[name = "ACF"]
+    Acf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -154,69 +170,185 @@ pub fn tuning_color(cents: f32) -> TuningColor {
     }
 }
 
-pub struct YinDetector {
+// ---------------------------------------------------------------------------
+// PitchDetector – dispatch to YIN / MPM / ACF with pre-emphasis
+// ---------------------------------------------------------------------------
+
+pub struct PitchDetector {
+    algorithm: DetectionAlgorithm,
     sample_rate: f32,
     min_frequency_hz: f32,
     max_frequency_hz: f32,
     threshold: f32,
-    difference: Vec<f32>,
-    cumulative_mean: Vec<f32>,
+    window_size: usize,
+
+    // --- shared ---
+    pre_emphasized: Vec<f32>,
+    prev_input: f32,
+
+    // --- YIN ---
+    yin_difference: Vec<f32>,
+    yin_cumulative_mean: Vec<f32>,
+
+    // --- MPM ---
+    mpm_acf: Vec<f32>,
+    mpm_nsdf: Vec<f32>,
+
+    // --- ACF ---
+    acf_windowed: Vec<f32>,
+    hann_window: Vec<f32>,
 }
 
-impl YinDetector {
+impl PitchDetector {
     pub fn new(sample_rate: f32, max_window_samples: usize) -> Self {
         let tau_len = max_window_samples / 2 + 1;
         Self {
+            algorithm: DetectionAlgorithm::Yin,
             sample_rate,
             min_frequency_hz: 70.0,
             max_frequency_hz: 1_200.0,
             threshold: 0.14,
-            difference: vec![0.0; tau_len],
-            cumulative_mean: vec![0.0; tau_len],
+            window_size: max_window_samples,
+            pre_emphasized: vec![0.0; max_window_samples],
+            prev_input: 0.0,
+            yin_difference: vec![0.0; tau_len],
+            yin_cumulative_mean: vec![0.0; tau_len],
+            mpm_acf: vec![0.0; tau_len],
+            mpm_nsdf: vec![0.0; tau_len],
+            acf_windowed: vec![0.0; max_window_samples],
+            hann_window: Self::make_hann_window(max_window_samples),
         }
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32, max_window_samples: usize) {
         self.sample_rate = sample_rate;
+        self.window_size = max_window_samples;
         let tau_len = max_window_samples / 2 + 1;
-        self.difference.resize(tau_len, 0.0);
-        self.cumulative_mean.resize(tau_len, 0.0);
+        self.yin_difference.resize(tau_len, 0.0);
+        self.yin_cumulative_mean.resize(tau_len, 0.0);
+        self.mpm_acf.resize(tau_len, 0.0);
+        self.mpm_nsdf.resize(tau_len, 0.0);
+        self.pre_emphasized.resize(max_window_samples, 0.0);
+        self.acf_windowed.resize(max_window_samples, 0.0);
+        self.hann_window.resize(max_window_samples, 0.0);
+        self.hann_window = Self::make_hann_window(max_window_samples);
+        self.prev_input = 0.0;
     }
 
+    pub fn reset(&mut self) {
+        self.prev_input = 0.0;
+        self.pre_emphasized.fill(0.0);
+        self.acf_windowed.fill(0.0);
+        self.yin_difference.fill(0.0);
+        self.yin_cumulative_mean.fill(0.0);
+        self.mpm_acf.fill(0.0);
+        self.mpm_nsdf.fill(0.0);
+    }
+
+    fn make_hann_window(n: usize) -> Vec<f32> {
+        if n <= 1 {
+            return vec![1.0; n];
+        }
+        (0..n)
+            .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / (n - 1) as f32).cos()))
+            .collect()
+    }
+
+    pub fn set_algorithm(&mut self, algorithm: DetectionAlgorithm) {
+        self.algorithm = algorithm;
+    }
+
+    pub fn algorithm(&self) -> DetectionAlgorithm {
+        self.algorithm
+    }
+
+    // ------------------------------------------------------------------
+    // Public entry point – applies pre-emphasis then dispatches
+    // ------------------------------------------------------------------
     pub fn detect(&mut self, samples: &[f32]) -> Option<PitchEstimate> {
         if samples.len() < 32 || self.sample_rate <= 0.0 {
             return None;
         }
+        if samples.len() > self.pre_emphasized.len() {
+            return None;
+        }
 
-        let rms = root_mean_square(samples);
+        let (rms, n) = self.apply_pre_emphasis(samples);
         if rms < 0.01 {
             return None;
         }
 
+        match self.algorithm {
+            DetectionAlgorithm::Yin => self.detect_yin(rms, n),
+            DetectionAlgorithm::Mpm => self.detect_mpm(rms, n),
+            DetectionAlgorithm::Acf => self.detect_acf(rms, n),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Pre-emphasis: y[n] = x[n] - alpha * x[n-1]   (first-order HPF)
+    // Returns (RMS of the filtered signal, number of samples processed).
+    // ------------------------------------------------------------------
+    fn apply_pre_emphasis(&mut self, samples: &[f32]) -> (f32, usize) {
+        let mut prev = self.prev_input;
+        let mut energy = 0.0;
+        for (i, sample) in samples.iter().enumerate() {
+            let filtered = sample - PRE_EMPHASIS_ALPHA * prev;
+            prev = *sample;
+            self.pre_emphasized[i] = filtered;
+            energy += filtered * filtered;
+        }
+        self.prev_input = prev;
+        ((energy / samples.len() as f32).sqrt(), samples.len())
+    }
+
+    // ------------------------------------------------------------------
+    // Tau bounds shared by YIN and MPM
+    // ------------------------------------------------------------------
+    fn tau_range(&self, window_len: usize) -> Option<(usize, usize)> {
         let max_tau = ((self.sample_rate / self.min_frequency_hz) as usize)
-            .min(samples.len().saturating_sub(2))
-            .min(self.difference.len().saturating_sub(1));
+            .min(window_len.saturating_sub(2))
+            .min(self.yin_difference.len().saturating_sub(1));
         let min_tau = ((self.sample_rate / self.max_frequency_hz) as usize).max(2);
         if max_tau <= min_tau + 2 {
-            return None;
+            None
+        } else {
+            Some((min_tau, max_tau))
         }
+    }
 
-        self.difference[0] = 0.0;
+    // ==================================================================
+    // YIN  (Yet another INtegrator)
+    //
+    // Squared difference function with cumulative-mean normalisation.
+    // Finds the first dip below a threshold in the normalised curve.
+    // Confidence = 1 - cmndf[tau].
+    // Fast, well-tested, good for clean monophonic signals.
+    // Weakness: amplitude changes distort the difference function;
+    // confidence is threshold-dependent.
+    // ==================================================================
+    fn detect_yin(&mut self, rms: f32, n: usize) -> Option<PitchEstimate> {
+        let (min_tau, max_tau) = self.tau_range(n)?;
+
+        self.yin_difference[0] = 0.0;
         for tau in 1..=max_tau {
+            let window_limit = n - tau;
+            let a = &self.pre_emphasized[..window_limit];
+            let b = &self.pre_emphasized[tau..tau + window_limit];
             let mut sum = 0.0;
-            for i in 0..(samples.len() - tau) {
-                let delta = samples[i] - samples[i + tau];
+            for i in 0..window_limit {
+                let delta = a[i] - b[i];
                 sum += delta * delta;
             }
-            self.difference[tau] = sum;
+            self.yin_difference[tau] = sum;
         }
 
-        self.cumulative_mean[0] = 1.0;
+        self.yin_cumulative_mean[0] = 1.0;
         let mut running_sum = 0.0;
         for tau in 1..=max_tau {
-            running_sum += self.difference[tau];
-            self.cumulative_mean[tau] = if running_sum > 0.0 {
-                self.difference[tau] * tau as f32 / running_sum
+            running_sum += self.yin_difference[tau];
+            self.yin_cumulative_mean[tau] = if running_sum > 0.0 {
+                self.yin_difference[tau] * tau as f32 / running_sum
             } else {
                 1.0
             };
@@ -224,14 +356,15 @@ impl YinDetector {
 
         let mut tau = min_tau;
         while tau <= max_tau {
-            if self.cumulative_mean[tau] < self.threshold {
-                while tau < max_tau && self.cumulative_mean[tau + 1] < self.cumulative_mean[tau] {
+            if self.yin_cumulative_mean[tau] < self.threshold {
+                while tau < max_tau
+                    && self.yin_cumulative_mean[tau + 1] < self.yin_cumulative_mean[tau]
+                {
                     tau += 1;
                 }
-
-                let better_tau = parabolic_interpolation(&self.cumulative_mean, tau, max_tau);
+                let better_tau = parabolic_interpolation(&self.yin_cumulative_mean, tau, max_tau);
                 let frequency_hz = self.sample_rate / better_tau;
-                let confidence = (1.0 - self.cumulative_mean[tau]).clamp(0.0, 1.0);
+                let confidence = (1.0 - self.yin_cumulative_mean[tau]).clamp(0.0, 1.0);
                 return Some(PitchEstimate {
                     frequency_hz,
                     confidence,
@@ -243,7 +376,148 @@ impl YinDetector {
 
         None
     }
+
+    // ==================================================================
+    // MPM  (McLeod Pitch Method)
+    //
+    // Uses the Normalised Squared Difference Function:
+    //   nsdf[τ] = 2·r[τ] / (r[0] + r_back[τ])
+    // where r[τ] is the autocorrelation of the windowed signal.
+    // This produces a naturally normalised 0-1 confidence at the peak.
+    //
+    // Benefits vs YIN:
+    //   • Clipping-resistant – the normalisation compensates for
+    //     amplitude variation across the window.
+    //   • Confidence is the peak height itself – more intuitive.
+    //   • No cumulative-mean trick needed – better octave error rate.
+    //   • Parabolic interpolation on the nsdf peak refines pitch.
+    // ==================================================================
+    fn detect_mpm(&mut self, rms: f32, n: usize) -> Option<PitchEstimate> {
+        let (min_tau, max_tau) = self.tau_range(n)?;
+
+        self.mpm_acf[0] = 0.0;
+        for i in 0..n {
+            self.mpm_acf[0] += self.pre_emphasized[i] * self.pre_emphasized[i];
+        }
+        if self.mpm_acf[0] < 1e-10 {
+            return None;
+        }
+
+        for tau in 1..=max_tau {
+            let window_limit = n - tau;
+            let a = &self.pre_emphasized[..window_limit];
+            let b = &self.pre_emphasized[tau..tau + window_limit];
+            let mut r = 0.0;
+            let mut r_back = 0.0;
+            for i in 0..window_limit {
+                r += a[i] * b[i];
+                r_back += b[i] * b[i];
+            }
+            self.mpm_acf[tau] = r;
+            self.mpm_nsdf[tau] = if r_back > 1e-10 && self.mpm_acf[0] > 1e-10 {
+                (2.0 * r / (self.mpm_acf[0] + r_back)).clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+
+        // Search for the highest nsdf peak in the valid tau range.
+        let mut best_tau = min_tau;
+        let mut best_val = self.mpm_nsdf[min_tau];
+        for tau in min_tau + 1..=max_tau {
+            if self.mpm_nsdf[tau] > best_val {
+                best_val = self.mpm_nsdf[tau];
+                best_tau = tau;
+            }
+        }
+
+        if best_val <= 0.05 {
+            return None;
+        }
+
+        let better_tau = parabolic_interpolation(&self.mpm_nsdf, best_tau, max_tau);
+        let frequency_hz = self.sample_rate / better_tau;
+        let confidence = best_val.clamp(0.0, 1.0);
+        Some(PitchEstimate {
+            frequency_hz,
+            confidence,
+            rms,
+        })
+    }
+
+    // ==================================================================
+    // ACF  (raw autocorrelation with Hann window)
+    //
+    // 1.  Apply Hann window to pre-emphasised samples.
+    // 2.  Compute raw autocorrelation: r[τ] = Σ x[i] · x[i+τ].
+    // 3.  Normalise to r[0] for a 0-1 confidence baseline.
+    // 4.  Find the *first* local peak above a threshold.
+    // 5.  Parabolic interpolation refines the peak.
+    //
+    // Benefits vs YIN / MPM:
+    //   • Uses raw autocorrelation (no difference/normalisation tricks).
+    //   • Simplest possible time-domain method — different failure modes.
+    //   • The first-peak rule avoids sub-harmonic (octave) errors
+    //     inherent in global-maximum searches.
+    //   • Hann window reduces spectral leakage, improving peak
+    //     separation for closely-spaced harmonics.
+    // ==================================================================
+    fn detect_acf(&mut self, rms: f32, n: usize) -> Option<PitchEstimate> {
+        let (min_tau, max_tau) = self.tau_range(n)?;
+
+        // Hann window the pre-emphasised samples
+        for i in 0..n {
+            self.acf_windowed[i] = self.pre_emphasized[i] * self.hann_window[i];
+        }
+
+        // Raw autocorrelation
+        self.mpm_acf[0] = 0.0;
+        for i in 0..n {
+            self.mpm_acf[0] += self.acf_windowed[i] * self.acf_windowed[i];
+        }
+        let r0 = self.mpm_acf[0];
+        if r0 < 1e-10 {
+            return None;
+        }
+
+        for tau in 1..=max_tau {
+            let window_limit = n - tau;
+            let mut r = 0.0;
+            for i in 0..window_limit {
+                r += self.acf_windowed[i] * self.acf_windowed[i + tau];
+            }
+            self.mpm_acf[tau] = r;
+        }
+
+        // Find first local peak above threshold in normalised ACF
+        let threshold = 0.25;
+        for tau in min_tau + 1..max_tau {
+            let norm = self.mpm_acf[tau] / r0;
+            if norm > threshold
+                && self.mpm_acf[tau] > self.mpm_acf[tau - 1]
+                && self.mpm_acf[tau] > self.mpm_acf[tau + 1]
+            {
+                let better_tau = parabolic_interpolation(&self.mpm_acf, tau, max_tau);
+                let frequency_hz = self.sample_rate / better_tau;
+                if frequency_hz < self.min_frequency_hz || frequency_hz > self.max_frequency_hz {
+                    continue;
+                }
+                let confidence = norm.clamp(0.0, 1.0);
+                return Some(PitchEstimate {
+                    frequency_hz,
+                    confidence,
+                    rms,
+                });
+            }
+        }
+
+        None
+    }
 }
+
+// =====================================================================
+// Response smoother  (Stable / Fast display hold)
+// =====================================================================
 
 pub struct ResponseSmoother {
     mode: ResponseMode,
@@ -370,6 +644,10 @@ impl ResponseSmoother {
     }
 }
 
+// =====================================================================
+// MIDI state machine
+// =====================================================================
+
 pub struct MidiState {
     active_note: Option<u8>,
     silence_samples: u32,
@@ -462,15 +740,14 @@ impl MidiState {
     }
 }
 
+// =====================================================================
+// Utilities
+// =====================================================================
+
 fn silence_timeout_samples(sample_rate: f32) -> u32 {
     (sample_rate * SILENCE_TIMEOUT_MS / 1_000.0)
         .round()
         .max(1.0) as u32
-}
-
-fn root_mean_square(samples: &[f32]) -> f32 {
-    let energy = samples.iter().map(|sample| sample * sample).sum::<f32>();
-    (energy / samples.len() as f32).sqrt()
 }
 
 fn parabolic_interpolation(values: &[f32], tau: usize, max_tau: usize) -> f32 {
@@ -485,9 +762,16 @@ fn parabolic_interpolation(values: &[f32], tau: usize, max_tau: usize) -> f32 {
     if denominator.abs() < f32::EPSILON {
         tau as f32
     } else {
-        tau as f32 + 0.5 * (left - right) / denominator
+        let offset = 0.5 * (left - right) / denominator;
+        // Clamp to [-1, 1] to avoid wild extrapolation on very flat peaks.
+        let offset = offset.clamp(-1.0, 1.0);
+        tau as f32 + offset
     }
 }
+
+// =====================================================================
+// Tests
+// =====================================================================
 
 #[cfg(test)]
 mod tests {
@@ -513,6 +797,21 @@ mod tests {
             cents,
         }
     }
+
+    fn sine_wave(freq_hz: f32, sample_rate: f32, length: usize) -> Vec<f32> {
+        (0..length)
+            .map(|i| (TAU * freq_hz * i as f32 / sample_rate).sin() * 0.4)
+            .collect()
+    }
+
+    fn detect_freq(alg: DetectionAlgorithm, freq_hz: f32, sample_rate: f32) -> f32 {
+        let mut detector = PitchDetector::new(sample_rate, 2_048);
+        detector.set_algorithm(alg);
+        let samples = sine_wave(freq_hz, sample_rate, 2_048);
+        detector.detect(&samples).unwrap().frequency_hz
+    }
+
+    // --- note mapping ---
 
     #[test]
     fn maps_a4_to_zero_cents() {
@@ -547,6 +846,277 @@ mod tests {
         assert_eq!(tuning_color(-10.0), TuningColor::Yellow);
         assert_eq!(tuning_color(23.0), TuningColor::OrangeRed);
     }
+
+    // --- pitch detectors ---
+
+    #[test]
+    fn yin_detects_440hz() {
+        let freq = detect_freq(DetectionAlgorithm::Yin, 440.0, 48_000.0);
+        assert!((freq - 440.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn mpm_detects_440hz() {
+        let freq = detect_freq(DetectionAlgorithm::Mpm, 440.0, 48_000.0);
+        assert!((freq - 440.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn acf_detects_440hz() {
+        let freq = detect_freq(DetectionAlgorithm::Acf, 440.0, 48_000.0);
+        assert!((freq - 440.0).abs() < 3.0, "acf detected: {freq}");
+    }
+
+    #[test]
+    fn acf_detects_high_frequency() {
+        let freq = detect_freq(DetectionAlgorithm::Acf, 1_000.0, 48_000.0);
+        assert!((freq - 1_000.0).abs() < 6.0);
+    }
+
+    #[test]
+    fn acf_confidence_on_clean_sine() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Acf);
+        let samples = sine_wave(440.0, 48_000.0, 2_048);
+        let pitch = detector.detect(&samples).unwrap();
+        assert!(pitch.confidence > 0.7);
+    }
+
+    #[test]
+    fn yin_detects_high_frequency() {
+        let freq = detect_freq(DetectionAlgorithm::Yin, 1_000.0, 48_000.0);
+        assert!((freq - 1_000.0).abs() < 5.0);
+    }
+
+    #[test]
+    fn mpm_detects_high_frequency() {
+        let freq = detect_freq(DetectionAlgorithm::Mpm, 1_000.0, 48_000.0);
+        assert!((freq - 1_000.0).abs() < 6.0);
+    }
+
+    #[test]
+    fn yin_confidence_on_clean_sine() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Yin);
+        let samples = sine_wave(440.0, 48_000.0, 2_048);
+        let pitch = detector.detect(&samples).unwrap();
+        assert!(pitch.confidence > 0.8);
+    }
+
+    #[test]
+    fn mpm_confidence_on_clean_sine() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Mpm);
+        let samples = sine_wave(440.0, 48_000.0, 2_048);
+        let pitch = detector.detect(&samples).unwrap();
+        assert!(pitch.confidence > 0.8);
+    }
+
+    #[test]
+    fn yin_set_sample_rate_reconfigures_buffers() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_sample_rate(44_100.0, 1_024);
+        let samples = vec![0.0; 1_024];
+        assert!(detector.detect(&samples).is_none());
+    }
+
+    #[test]
+    fn mpm_set_sample_rate_reconfigures_buffers() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Mpm);
+        detector.set_sample_rate(44_100.0, 1_024);
+        let samples = vec![0.0; 1_024];
+        assert!(detector.detect(&samples).is_none());
+    }
+
+    #[test]
+    fn acf_set_sample_rate_reconfigures_buffers() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Acf);
+        detector.set_sample_rate(44_100.0, 1_024);
+        let samples = vec![0.0; 1_024];
+        assert!(detector.detect(&samples).is_none());
+    }
+
+    #[test]
+    fn all_algorithms_reject_short_buffer() {
+        let algs = [
+            DetectionAlgorithm::Yin,
+            DetectionAlgorithm::Mpm,
+            DetectionAlgorithm::Acf,
+        ];
+        for alg in algs {
+            let mut detector = PitchDetector::new(48_000.0, 2_048);
+            detector.set_algorithm(alg);
+            assert!(detector.detect(&[0.5; 16]).is_none());
+        }
+    }
+
+    #[test]
+    fn all_algorithms_reject_oversized_buffer() {
+        let mut detector = PitchDetector::new(48_000.0, 512);
+        let samples = vec![0.0; 1_024];
+        assert!(detector.detect(&samples).is_none());
+    }
+
+    #[test]
+    fn algorithm_switching_at_runtime() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        let samples = sine_wave(440.0, 48_000.0, 2_048);
+
+        detector.set_algorithm(DetectionAlgorithm::Yin);
+        let yin = detector.detect(&samples).unwrap();
+
+        detector.set_algorithm(DetectionAlgorithm::Mpm);
+        let mpm = detector.detect(&samples).unwrap();
+
+        detector.set_algorithm(DetectionAlgorithm::Acf);
+        let acf = detector.detect(&samples).unwrap();
+
+        assert!((yin.frequency_hz - 440.0).abs() < 1.0);
+        assert!((mpm.frequency_hz - 440.0).abs() < 2.0);
+        assert!((acf.frequency_hz - 440.0).abs() < 3.0);
+    }
+
+    #[test]
+    fn detector_reset_clears_pre_emphasis_state() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Yin);
+        let samples = sine_wave(440.0, 48_000.0, 2_048);
+        let _ = detector.detect(&samples);
+
+        detector.reset();
+        // After reset, silence should return None
+        assert!(detector.detect(&[0.0; 2_048]).is_none());
+        // And prev_input should be 0, so a new sine should still detect correctly
+        let pitch = detector.detect(&samples).unwrap();
+        assert!((pitch.frequency_hz - 440.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn pre_emphasis_state_carried_across_calls() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Yin);
+
+        let samples1 = sine_wave(440.0, 48_000.0, 1_024);
+        let samples2: Vec<f32> = (0..1_024)
+            .map(|i| (TAU * 440.0 * (i + 1_024) as f32 / 48_000.0).sin() * 0.4)
+            .collect();
+
+        let _ = detector.detect(&samples1);
+        let pitch = detector.detect(&samples2).unwrap();
+        assert!((pitch.frequency_hz - 440.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn yin_detects_low_e_string() {
+        let freq = detect_freq(DetectionAlgorithm::Yin, 82.41, 48_000.0);
+        assert!((freq - 82.41).abs() < 2.0);
+    }
+
+    #[test]
+    fn mpm_detects_low_e_string_with_larger_window() {
+        // MPM needs ~4+ periods in the window for reliable low-frequency detection.
+        // With 2048 samples @ 48kHz (~3.5 periods for 82Hz) the NSDF peak can be
+        // swamped by shorter-lag correlation. 4096 samples gives ~4.7 periods
+        // and restores the fundamental peak.
+        let mut detector = PitchDetector::new(48_000.0, 4_096);
+        detector.set_algorithm(DetectionAlgorithm::Mpm);
+        let samples = sine_wave(82.41, 48_000.0, 4_096);
+        let freq = detector.detect(&samples).unwrap().frequency_hz;
+        assert!((freq - 82.41).abs() < 3.0);
+    }
+
+    #[test]
+    fn acf_detects_low_e_string() {
+        let freq = detect_freq(DetectionAlgorithm::Acf, 82.41, 48_000.0);
+        assert!((freq - 82.41).abs() < 4.0, "acf low E: {freq}");
+    }
+
+    fn sawtooth_wave(freq_hz: f32, sample_rate: f32, length: usize) -> Vec<f32> {
+        let period = sample_rate / freq_hz;
+        (0..length)
+            .map(|i| {
+                let phase = (i as f32 / period) % 1.0;
+                (phase * 2.0 - 1.0) * 0.4
+            })
+            .collect()
+    }
+
+    fn noisy_sine_wave(
+        freq_hz: f32,
+        sample_rate: f32,
+        length: usize,
+        noise_level: f32,
+    ) -> Vec<f32> {
+        let mut samples = sine_wave(freq_hz, sample_rate, length);
+        for (i, sample) in samples.iter_mut().enumerate() {
+            // Simple LCG pseudo-random noise, deterministic across runs
+            let noise =
+                ((i.wrapping_mul(1103515245).wrapping_add(12345) & 0x7fffffff) as f32
+                    / 0x7fffffff as f32)
+                    * 2.0
+                    - 1.0;
+            *sample += noise * noise_level;
+        }
+        samples
+    }
+
+    #[test]
+    fn yin_detects_sawtooth_440hz() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Yin);
+        let samples = sawtooth_wave(440.0, 48_000.0, 2_048);
+        let pitch = detector.detect(&samples).unwrap();
+        assert!((pitch.frequency_hz - 440.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn mpm_detects_sawtooth_440hz() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Mpm);
+        let samples = sawtooth_wave(440.0, 48_000.0, 2_048);
+        let pitch = detector.detect(&samples).unwrap();
+        assert!((pitch.frequency_hz - 440.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn acf_detects_sawtooth_440hz() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Acf);
+        let samples = sawtooth_wave(440.0, 48_000.0, 2_048);
+        let pitch = detector.detect(&samples).unwrap();
+        assert!((pitch.frequency_hz - 440.0).abs() < 3.0, "acf sawtooth: {freq}", freq = pitch.frequency_hz);
+    }
+
+    #[test]
+    fn yin_detects_noisy_sine() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Yin);
+        let samples = noisy_sine_wave(440.0, 48_000.0, 2_048, 0.01);
+        let pitch = detector.detect(&samples).unwrap();
+        assert!((pitch.frequency_hz - 440.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn mpm_detects_noisy_sine() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Mpm);
+        let samples = noisy_sine_wave(440.0, 48_000.0, 2_048, 0.01);
+        let pitch = detector.detect(&samples).unwrap();
+        assert!((pitch.frequency_hz - 440.0).abs() < 3.0);
+    }
+
+    #[test]
+    fn acf_detects_noisy_sine() {
+        let mut detector = PitchDetector::new(48_000.0, 2_048);
+        detector.set_algorithm(DetectionAlgorithm::Acf);
+        let samples = noisy_sine_wave(440.0, 48_000.0, 2_048, 0.01);
+        let pitch = detector.detect(&samples).unwrap();
+        assert!((pitch.frequency_hz - 440.0).abs() < 4.0, "acf noisy: {freq}", freq = pitch.frequency_hz);
+    }
+
+    // --- response smoother ---
 
     #[test]
     fn fast_changes_note_faster_than_stable() {
@@ -621,6 +1191,8 @@ mod tests {
         assert!(updated.cents > 0.0);
     }
 
+    // --- midi ---
+
     #[test]
     fn midi_state_tracks_one_active_note() {
         let mut midi = MidiState::new(48_000.0);
@@ -646,54 +1218,6 @@ mod tests {
             midi.update(None, ResponseMode::Fast, 5_760),
             MidiDecision::NoteOff { note: 71 }
         );
-    }
-
-    #[test]
-    fn yin_detects_monophonic_sine() {
-        let sample_rate = 48_000.0;
-        let mut detector = YinDetector::new(sample_rate, 2_048);
-        let mut samples = [0.0; 2_048];
-        for (index, sample) in samples.iter_mut().enumerate() {
-            *sample = (TAU * 440.0 * index as f32 / sample_rate).sin() * 0.4;
-        }
-
-        let pitch = detector.detect(&samples).unwrap();
-        assert!((pitch.frequency_hz - 440.0).abs() < 1.0);
-        assert!(pitch.confidence > 0.8);
-    }
-
-    #[test]
-    fn yin_rejects_silence() {
-        let mut detector = YinDetector::new(48_000.0, 2_048);
-        let samples = [0.0; 2_048];
-        assert!(detector.detect(&samples).is_none());
-    }
-
-    #[test]
-    fn yin_rejects_short_buffer() {
-        let mut detector = YinDetector::new(48_000.0, 2_048);
-        assert!(detector.detect(&[0.5; 16]).is_none());
-    }
-
-    #[test]
-    fn yin_detects_high_frequency() {
-        let sample_rate = 48_000.0;
-        let mut detector = YinDetector::new(sample_rate, 2_048);
-        let mut samples = [0.0; 2_048];
-        for (index, sample) in samples.iter_mut().enumerate() {
-            *sample = (TAU * 1_000.0 * index as f32 / sample_rate).sin() * 0.4;
-        }
-        let pitch = detector.detect(&samples).unwrap();
-        assert!((pitch.frequency_hz - 1_000.0).abs() < 5.0);
-        assert!(pitch.confidence > 0.7);
-    }
-
-    #[test]
-    fn yin_set_sample_rate_reconfigures_buffers() {
-        let mut detector = YinDetector::new(48_000.0, 2_048);
-        detector.set_sample_rate(44_100.0, 1_024);
-        let samples = vec![0.0; 1_024];
-        assert!(detector.detect(&samples).is_none());
     }
 
     #[test]
