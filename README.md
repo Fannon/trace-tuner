@@ -1,72 +1,96 @@
 # Trace Tuner
 
-Trace Tuner is a minimal Rust tuner plugin for CLAP and VST3. It passes audio through unchanged, analyzes a mono sum of the input, shows compact tuning feedback, and can emit the detected target note as MIDI.
+Trace Tuner is a compact tuner plugin for musicians and producers. It listens to incoming audio, shows the detected pitch and tuning drift, and can emit the detected note as MIDI for simple audio-to-note workflows.
 
-Author/vendor: Simon Heimler
+![Trace Tuner screenshot](assets/screenshot.png)
 
 ## Features
 
-- CLAP and VST3 exports through NIH-plug
-- Chromatic and standard guitar target modes
-- Stable and Reactive response modes
-- A4 reference pitch parameter from 430 Hz to 450 Hz
-- Monophonic YIN-style pitch detection for guitar, voice, and simple pitched sources
-- Optional compact egui UI with note, frequency, cents, history graph, and fine-tune meter
-- One-note MIDI output state machine
+- Real-time monophonic pitch detection for guitar, voice, and other clear single-note sources
+- Chromatic tuning mode plus a guitar-string target mode
+- Stable and Fast response modes
+- Tuning history graph and fine-tune meter
+- A4 reference pitch from 430 Hz to 450 Hz
+- Audio passthrough: the plugin does not alter the incoming signal
+- Optional MIDI note output from the detected target note
+- CLAP and VST3 plugin formats
 
-## Build
+## Installation
 
-Install Rust stable and use Cargo from the repository root.
+Trace Tuner is intended for modern DAWs that support CLAP or VST3 audio effects.
+
+1. Download a [release for your platform](https://github.com/Fannon/trace-tuner/releases).
+2. Install `TraceTuner.clap` and/or `TraceTuner.vst3` into your normal plugin folder.
+3. Rescan plugins in your DAW.
+4. Insert Trace Tuner on an audio track with a monophonic source.
+
+## Usage
+
+- Play one note at a time. Trace Tuner is not designed for chords or dense polyphonic material.
+- Use `Chromatic` for general tuning.
+- Use `Guitar` when you want the display to snap to standard guitar string targets.
+- Use `Stable` for sustained tuning checks. It smooths the display and holds through short confidence dropouts as a note rings out.
+- Use `Fast` for faster tracking of bends, vibrato, slides, and quick note changes. It reacts sooner, but can jump more on ambiguous input.
+- Adjust `A4` if your session or instrument uses a reference other than 440 Hz.
+
+The green zone represents roughly +/-10 cents. +/-5 cents is very tight; +/-10 cents is commonly acceptable for practical tuning, depending on instrument and context.
+
+## MIDI Output
+
+Trace Tuner can emit one active MIDI note based on the detected target pitch.
+
+- CLAP supports note output directly.
+- VST3 host support for MIDI/note output from audio effects varies, so routing depends on the DAW.
+- MIDI output uses a stricter confidence gate than the visual display to avoid extra note chatter.
+- Stable mode waits for three confirmed frames before switching notes.
+- Fast mode can switch after one confirmed frame.
+
+## Alpha Notes
+
+This is an initial alpha release. The core tuner path is working, but expect host-specific rough edges.
+
+Known limitations:
+
+- Monophonic sources only
+- No standalone app
+- Fixed-size editor for now
+- No built-in calibration workflow beyond the A4 parameter
+- Tuning confidence depends strongly on input level, background noise, and note sustain
+
+Trace Tuner was developed with AI assistance. Code, behavior, and release artifacts are still reviewed and maintained by the project author.
+
+## Development
+
+Build release plugins with the GUI enabled:
 
 ```sh
-cargo test
-cargo build --release
-cargo xtask bundle trace_tuner --release
-```
-
-The UI is behind the `gui` feature because egui/baseview requires native windowing packages on Linux.
-
-```sh
-cargo build --release --features gui
 cargo xtask bundle trace_tuner --release --features gui
 ```
 
-On Debian/Ubuntu systems, the GUI build may require:
+For local drop-in builds with timestamped snapshots:
 
 ```sh
-sudo apt install libx11-xcb-dev libx11-dev libxcb1-dev libgl-dev
+bash build.sh
 ```
 
-## Artifacts
+On Windows:
 
-NIH-plug writes plugin bundles under:
+```bat
+build.bat
+```
+
+The scripts copy the latest bundles to `bin/` and create snapshots under `tmp/release_YYYYMMDD_HHMMSS/`.
+
+On Windows during local testing, the easiest drop-in artifact is:
 
 ```text
-target/bundled/
+bin/TraceTuner.clap
 ```
 
-Expected outputs after bundling:
+Verify before release:
 
-- `target/bundled/trace_tuner.clap`
-- `target/bundled/trace_tuner.vst3`
-
-Direct Cargo builds also produce the platform dynamic library under `target/release/`, but hosts normally expect the bundled CLAP/VST3 layout.
-
-## MIDI Behavior
-
-Trace Tuner tracks one active emitted note.
-
-- Velocity: fixed at `100 / 127`
-- Channel: `0`
-- Note-on: emitted when a confident target note becomes active
-- Note changes: note-off for the previous note is emitted before note-on for the new note at the same processing timestamp
-- Silence timeout: about `120 ms` of silence or low confidence before note-off
-- Confidence gate: pitch confidence must be at least `0.80`
-- Stable mode: requires three confirmed frames before MIDI note changes
-- Reactive mode: allows note changes after one confirmed frame
-
-CLAP supports note output directly. VST3 hosts vary in how they expose MIDI/note output from audio effects, so routing may depend on the host.
-
-## Notes
-
-The audio processing path does not modify samples. Analysis buffers are allocated up front and reused during processing.
+```sh
+cargo fmt --check
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+```

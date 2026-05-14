@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "trace_tuner"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
 authors = ["Simon Heimler"]
 license = "MIT"
@@ -24,3 +24,10 @@ atomic_float = "1"
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git", optional = true }
 serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"
+strip = true
+panic = "abort"

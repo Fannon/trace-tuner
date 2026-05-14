@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libgl-dev libx11-dev libxcursor-dev libxi-dev libxkbcommon-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-xcb-dev libjack-jackd2-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo check
+        run: cargo check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  build:
+    name: Build (${{ matrix.os-name }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            os-name: windows
+          - os: macos-latest
+            os-name: macos
+          - os: ubuntu-latest
+            os-name: linux
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux Dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libgl-dev libx11-dev libxcursor-dev libxi-dev libxkbcommon-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-xcb-dev libjack-jackd2-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Bundle Release Artifacts
+        run: cargo xtask bundle trace_tuner --release --features gui
+
+      - name: Install pluginval
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install pluginval -y --no-progress
+
+          $pluginval = @(
+            (Get-Command pluginval.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1),
+            "C:\ProgramData\chocolatey\bin\pluginval.exe",
+            "C:\ProgramData\chocolatey\lib\pluginval\tools\pluginval.exe"
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+
+          if (-not $pluginval) {
+            throw "pluginval.exe was not found after Chocolatey install"
+          }
+
+          Split-Path -Parent $pluginval | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "PLUGINVAL_EXE=$pluginval" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Validate VST3 with pluginval
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          & "$env:PLUGINVAL_EXE" `
+            --validate-in-process `
+            --strictness-level 5 `
+            --output-dir pluginval-logs `
+            --validate target\bundled\TraceTuner.vst3
+
+      - name: Prepare Artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/TraceTuner | Out-Null
+          Copy-Item -Recurse -Force "target/bundled/TraceTuner.vst3" "dist/TraceTuner/TraceTuner.vst3"
+          Copy-Item -Recurse -Force "target/bundled/TraceTuner.clap" "dist/TraceTuner/TraceTuner.clap"
+          Compress-Archive -Path dist/TraceTuner -DestinationPath "dist/TraceTuner_${{ matrix.os-name }}.zip" -Force
+
+      - name: Upload pluginval logs
+        if: always() && matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-pluginval-logs
+          path: pluginval-logs/**
+          if-no-files-found: ignore
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.os-name }}-zip
+          path: dist/*.zip
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: output
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output/*.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          overwrite_files: true

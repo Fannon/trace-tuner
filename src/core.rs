@@ -3,6 +3,11 @@ use nih_plug::prelude::Enum;
 pub const MIDI_VELOCITY: f32 = 100.0 / 127.0;
 pub const SILENCE_TIMEOUT_MS: f32 = 120.0;
 
+const ACQUIRE_CONFIDENCE: f32 = 0.80;
+const HOLD_CONFIDENCE: f32 = 0.60;
+const STABLE_DISPLAY_HOLD_FRAMES: u8 = 36;
+const FAST_DISPLAY_HOLD_FRAMES: u8 = 4;
+
 const NOTE_NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
 ];
@@ -20,8 +25,8 @@ pub enum TunerMode {
 pub enum ResponseMode {
     #[id = "stable"]
     Stable,
-    #[id = "reactive"]
-    Reactive,
+    #[id = "fast"]
+    Fast,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -245,6 +250,7 @@ pub struct ResponseSmoother {
     current: DetectionSnapshot,
     candidate_note: Option<u8>,
     candidate_count: u8,
+    missing_count: u8,
 }
 
 impl ResponseSmoother {
@@ -254,6 +260,7 @@ impl ResponseSmoother {
             current: DetectionSnapshot::idle(),
             candidate_note: None,
             candidate_count: 0,
+            missing_count: 0,
         }
     }
 
@@ -262,6 +269,7 @@ impl ResponseSmoother {
             self.mode = mode;
             self.candidate_note = None;
             self.candidate_count = 0;
+            self.missing_count = 0;
         }
     }
 
@@ -269,19 +277,21 @@ impl ResponseSmoother {
         self.current = DetectionSnapshot::idle();
         self.candidate_note = None;
         self.candidate_count = 0;
+        self.missing_count = 0;
     }
 
     pub fn update(&mut self, next: Option<DetectionSnapshot>) -> DetectionSnapshot {
         let Some(next) = next else {
-            self.current = DetectionSnapshot::idle();
-            self.candidate_note = None;
-            self.candidate_count = 0;
-            return self.current;
+            return self.update_missing();
         };
+
+        if next.confidence < self.required_confidence(next.midi_note) {
+            return self.update_missing();
+        }
 
         let required = match self.mode {
             ResponseMode::Stable => 3,
-            ResponseMode::Reactive => 1,
+            ResponseMode::Fast => 1,
         };
 
         if !self.current.active || next.midi_note == self.current.midi_note {
@@ -306,7 +316,7 @@ impl ResponseSmoother {
     fn accept(&mut self, next: DetectionSnapshot) {
         let weight = match self.mode {
             ResponseMode::Stable => 0.25,
-            ResponseMode::Reactive => 0.65,
+            ResponseMode::Fast => 0.65,
         };
 
         if self.current.active && self.current.midi_note == next.midi_note {
@@ -323,6 +333,38 @@ impl ResponseSmoother {
 
         self.candidate_note = None;
         self.candidate_count = 0;
+        self.missing_count = 0;
+    }
+
+    fn required_confidence(&self, midi_note: u8) -> f32 {
+        if self.mode == ResponseMode::Stable
+            && self.current.active
+            && self.current.midi_note == midi_note
+        {
+            HOLD_CONFIDENCE
+        } else {
+            ACQUIRE_CONFIDENCE
+        }
+    }
+
+    fn update_missing(&mut self) -> DetectionSnapshot {
+        self.candidate_note = None;
+        self.candidate_count = 0;
+
+        if self.current.active {
+            self.missing_count = self.missing_count.saturating_add(1);
+            let hold_frames = match self.mode {
+                ResponseMode::Stable => STABLE_DISPLAY_HOLD_FRAMES,
+                ResponseMode::Fast => FAST_DISPLAY_HOLD_FRAMES,
+            };
+            if self.missing_count < hold_frames {
+                return self.current;
+            }
+        }
+
+        self.current = DetectionSnapshot::idle();
+        self.missing_count = 0;
+        self.current
     }
 }
 
@@ -364,7 +406,7 @@ impl MidiState {
     ) -> MidiDecision {
         let required = match mode {
             ResponseMode::Stable => 3,
-            ResponseMode::Reactive => 1,
+            ResponseMode::Fast => 1,
         };
 
         let Some(detection) = detection.filter(|d| d.active) else {
@@ -451,10 +493,18 @@ mod tests {
     use std::f32::consts::TAU;
 
     fn active_snapshot(midi_note: u8, cents: f32) -> DetectionSnapshot {
+        active_snapshot_with_confidence(midi_note, cents, 0.9)
+    }
+
+    fn active_snapshot_with_confidence(
+        midi_note: u8,
+        cents: f32,
+        confidence: f32,
+    ) -> DetectionSnapshot {
         DetectionSnapshot {
             active: true,
             frequency_hz: midi_note_frequency(midi_note, 440.0),
-            confidence: 0.9,
+            confidence,
             rms: 0.2,
             midi_note,
             target_frequency_hz: midi_note_frequency(midi_note, 440.0),
@@ -497,18 +547,18 @@ mod tests {
     }
 
     #[test]
-    fn reactive_changes_note_faster_than_stable() {
+    fn fast_changes_note_faster_than_stable() {
         let mut stable = ResponseSmoother::new(ResponseMode::Stable);
-        let mut reactive = ResponseSmoother::new(ResponseMode::Reactive);
+        let mut fast = ResponseSmoother::new(ResponseMode::Fast);
 
         stable.update(Some(active_snapshot(69, 0.0)));
-        reactive.update(Some(active_snapshot(69, 0.0)));
+        fast.update(Some(active_snapshot(69, 0.0)));
 
         let stable_after_one = stable.update(Some(active_snapshot(71, 0.0)));
-        let reactive_after_one = reactive.update(Some(active_snapshot(71, 0.0)));
+        let fast_after_one = fast.update(Some(active_snapshot(71, 0.0)));
 
         assert_eq!(stable_after_one.midi_note, 69);
-        assert_eq!(reactive_after_one.midi_note, 71);
+        assert_eq!(fast_after_one.midi_note, 71);
 
         stable.update(Some(active_snapshot(71, 0.0)));
         let stable_after_three = stable.update(Some(active_snapshot(71, 0.0)));
@@ -516,19 +566,45 @@ mod tests {
     }
 
     #[test]
-    fn stable_smoothing_reduces_jitter_more_than_reactive() {
+    fn stable_smoothing_reduces_jitter_more_than_fast() {
         let mut stable = ResponseSmoother::new(ResponseMode::Stable);
-        let mut reactive = ResponseSmoother::new(ResponseMode::Reactive);
+        let mut fast = ResponseSmoother::new(ResponseMode::Fast);
 
         stable.update(Some(active_snapshot(69, 0.0)));
-        reactive.update(Some(active_snapshot(69, 0.0)));
+        fast.update(Some(active_snapshot(69, 0.0)));
 
         let stable_update = stable.update(Some(active_snapshot(69, 20.0)));
-        let reactive_update = reactive.update(Some(active_snapshot(69, 20.0)));
+        let fast_update = fast.update(Some(active_snapshot(69, 20.0)));
 
-        assert!(stable_update.cents < reactive_update.cents);
+        assert!(stable_update.cents < fast_update.cents);
         assert!((stable_update.cents - 5.0).abs() < 0.01);
-        assert!((reactive_update.cents - 13.0).abs() < 0.01);
+        assert!((fast_update.cents - 13.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn stable_display_holds_through_brief_missing_detection() {
+        let mut stable = ResponseSmoother::new(ResponseMode::Stable);
+        stable.update(Some(active_snapshot(69, 0.0)));
+
+        for _ in 0..(STABLE_DISPLAY_HOLD_FRAMES - 1) {
+            let held = stable.update(None);
+            assert!(held.active);
+            assert_eq!(held.midi_note, 69);
+        }
+
+        assert!(!stable.update(None).active);
+    }
+
+    #[test]
+    fn stable_display_keeps_lower_confidence_same_note() {
+        let mut stable = ResponseSmoother::new(ResponseMode::Stable);
+        stable.update(Some(active_snapshot(69, 0.0)));
+
+        let updated = stable.update(Some(active_snapshot_with_confidence(69, 8.0, 0.65)));
+
+        assert!(updated.active);
+        assert_eq!(updated.midi_note, 69);
+        assert!(updated.cents > 0.0);
     }
 
     #[test]
@@ -538,14 +614,14 @@ mod tests {
         let b4 = active_snapshot(71, 0.0);
 
         assert_eq!(
-            midi.update(Some(a4), ResponseMode::Reactive, 128),
+            midi.update(Some(a4), ResponseMode::Fast, 128),
             MidiDecision::NoteOn {
                 note: 69,
                 velocity: MIDI_VELOCITY
             }
         );
         assert_eq!(
-            midi.update(Some(b4), ResponseMode::Reactive, 128),
+            midi.update(Some(b4), ResponseMode::Fast, 128),
             MidiDecision::NoteChange {
                 off: 69,
                 on: 71,
@@ -553,7 +629,7 @@ mod tests {
             }
         );
         assert_eq!(
-            midi.update(None, ResponseMode::Reactive, 5_760),
+            midi.update(None, ResponseMode::Fast, 5_760),
             MidiDecision::NoteOff { note: 71 }
         );
     }
