@@ -10,6 +10,7 @@ Trace Tuner is a compact tuner plugin for musicians and producers. It listens to
 - Chromatic tuning mode plus a guitar-string target mode
 - Stable and Fast response modes
 - Switchable pitch detectors: YIN, MPM, and ACF
+- Minimal input and confidence meters
 - Analysis-only input normalization to improve quiet-note detection
 - Optional pYIN comparison detector behind the `pyin-detector` build feature
 - Tuning history graph and fine-tune meter
@@ -51,9 +52,9 @@ Trace Tuner can emit one active MIDI note based on the detected target pitch.
 - Stable mode waits for three confirmed frames before switching notes.
 - Fast mode can switch after one confirmed frame.
 
-## Alpha Notes
+## Release Notes
 
-This is an initial alpha release. The core tuner path is working, but expect host-specific rough edges.
+This is an initial release. The core tuner path is working, but expect host-specific rough edges.
 
 Known limitations:
 

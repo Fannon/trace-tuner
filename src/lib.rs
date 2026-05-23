@@ -316,6 +316,7 @@ impl Plugin for TraceTuner {
                 let elapsed_samples = self.samples_since_analysis as u32;
                 self.samples_since_analysis = 0;
                 self.copy_analysis_window();
+                let input_rms = analysis_rms(&self.analysis_scratch);
                 #[cfg(feature = "analysis-normalization")]
                 normalize_analysis_window(&mut self.analysis_scratch);
 
@@ -337,7 +338,8 @@ impl Plugin for TraceTuner {
                         })
                     });
 
-                let smoothed = self.smoother.update(detected);
+                let mut smoothed = self.smoother.update(detected);
+                smoothed.rms = input_rms;
                 self.shared_state.publish(smoothed);
                 let detection =
                     detected.filter(|snapshot| snapshot.confidence >= ACQUIRE_CONFIDENCE);
@@ -420,7 +422,6 @@ fn normalize_analysis_window(samples: &mut [f32]) -> f32 {
     gain
 }
 
-#[cfg(feature = "analysis-normalization")]
 fn analysis_rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
