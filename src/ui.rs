@@ -23,12 +23,11 @@ const MUTED: Color32 = Color32::from_rgb(116, 124, 134);
 const BLUE: Color32 = Color32::from_rgb(82, 145, 255);
 const TUNING_RANGE_CENTS: f32 = 50.0;
 const IN_TUNE_CENTS: f32 = 10.0;
-const HISTORY_MIN_HEIGHT: f32 = 142.0;
-const STATUS_METER_HEIGHT: f32 = 8.0;
+const HISTORY_MIN_HEIGHT: f32 = 146.0;
+const CONFIDENCE_METER_HEIGHT: f32 = 6.0;
 const METER_HEIGHT: f32 = 22.0;
 const CONTROL_HEIGHT: f32 = 24.0;
 const TRACE_BREAK_CENTS: f32 = 35.0;
-const INPUT_FULL_SCALE_RMS: f32 = 0.05;
 
 pub fn create_editor(
     params: Arc<TraceTunerParams>,
@@ -59,7 +58,7 @@ pub fn create_editor(
                     let history = shared_state.history();
 
                     draw_header(ui, snapshot);
-                    draw_status_meters(ui, snapshot);
+                    draw_confidence_meter(ui, snapshot);
                     draw_history(ui, &history);
                     draw_meter(ui, snapshot);
                     draw_controls(ui, &params, setter);
@@ -115,8 +114,8 @@ fn draw_header(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {
     });
 }
 
-fn draw_status_meters(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {
-    let desired = Vec2::new(ui.available_width(), STATUS_METER_HEIGHT);
+fn draw_confidence_meter(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {
+    let desired = Vec2::new(ui.available_width(), CONFIDENCE_METER_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::hover());
     let painter = ui.painter_at(rect);
 
@@ -125,44 +124,19 @@ fn draw_status_meters(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {
         Pos2::new(rect.left() + inset, rect.top() + 1.0),
         Pos2::new(rect.right() - inset, rect.bottom() - 1.0),
     );
-    let row_height = 2.0;
-    let input_y = track.top();
-    let confidence_y = track.bottom() - row_height;
-    let input_level = input_meter_level(snapshot.rms);
     let confidence_level = snapshot.confidence.clamp(0.0, 1.0);
-    let input_track = Rect::from_min_size(
-        Pos2::new(track.left(), input_y),
-        Vec2::new(track.width(), row_height),
-    );
-    let confidence_track = Rect::from_min_size(
-        Pos2::new(track.left(), confidence_y),
-        Vec2::new(track.width(), row_height),
-    );
 
-    painter.rect_filled(input_track, 1.0, Color32::from_rgb(31, 35, 42));
-    painter.rect_filled(confidence_track, 1.0, Color32::from_rgb(31, 35, 42));
+    painter.rect_filled(track, 1.0, Color32::from_rgb(31, 35, 42));
     painter.rect_filled(
         Rect::from_min_size(
-            input_track.min,
-            Vec2::new(input_track.width() * input_level, row_height),
-        ),
-        1.0,
-        Color32::from_rgb(104, 136, 170),
-    );
-    painter.rect_filled(
-        Rect::from_min_size(
-            confidence_track.min,
-            Vec2::new(confidence_track.width() * confidence_level, row_height),
+            track.min,
+            Vec2::new(track.width() * confidence_level, track.height()),
         ),
         1.0,
         confidence_color(confidence_level),
     );
 
-    response.on_hover_text(format!(
-        "Input {:.1}%\nConfidence {:.1}%",
-        input_level * 100.0,
-        confidence_level * 100.0
-    ));
+    response.on_hover_text(format!("Confidence {:.1}%", confidence_level * 100.0));
 }
 
 fn draw_history(ui: &mut egui::Ui, history: &[HistoryPoint; HISTORY_LEN]) {
@@ -436,25 +410,13 @@ fn cents_to_x(rect: Rect, cents: f32) -> f32 {
     rect.center().x + (cents / TUNING_RANGE_CENTS) * rect.width() * 0.5
 }
 
-fn input_meter_level(rms: f32) -> f32 {
-    (rms / INPUT_FULL_SCALE_RMS).sqrt().clamp(0.0, 1.0)
-}
-
 fn confidence_color(confidence: f32) -> Color32 {
     let confidence = confidence.clamp(0.0, 1.0);
-    if confidence < 0.5 {
-        lerp_color(
-            Color32::from_rgb(235, 91, 78),
-            Color32::from_rgb(232, 196, 74),
-            confidence * 2.0,
-        )
-    } else {
-        lerp_color(
-            Color32::from_rgb(232, 196, 74),
-            Color32::from_rgb(51, 188, 116),
-            (confidence - 0.5) * 2.0,
-        )
-    }
+    lerp_color(
+        Color32::from_rgb(64, 78, 96),
+        Color32::from_rgb(82, 145, 255),
+        confidence.powf(0.75),
+    )
 }
 
 fn lerp_color(start: Color32, end: Color32, amount: f32) -> Color32 {

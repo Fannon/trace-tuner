@@ -2500,7 +2500,7 @@ dependencies = [
 
 [[package]]
 name = "trace_tuner"
-version = "0.1.1"
+version = "1.1.2"
 dependencies = [
  "atomic_float 1.1.0",
  "nih_plug",

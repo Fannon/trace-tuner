@@ -10,7 +10,7 @@ Trace Tuner is a compact tuner plugin for musicians and producers. It listens to
 - Chromatic tuning mode plus a guitar-string target mode
 - Stable and Fast response modes
 - Switchable pitch detectors: YIN, MPM, and ACF
-- Minimal input and confidence meters
+- Minimal confidence meter
 - Analysis-only input normalization to improve quiet-note detection
 - Optional pYIN comparison detector behind the `pyin-detector` build feature
 - Tuning history graph and fine-tune meter
