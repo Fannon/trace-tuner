@@ -18,18 +18,19 @@ crate-type = ["cdylib", "lib"]
 [features]
 default = ["rt-alloc-check"]
 gui = ["dep:nih_plug_egui"]
+pyin-detector = ["dep:pyin"]
 rt-alloc-check = ["nih_plug/assert_process_allocs"]
 
 [dependencies]
 atomic_float = "1"
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git", optional = true }
-pyin = "1.2.0"
+pyin = { version = "1.2.0", optional = true }
 serde = { version = "1", features = ["derive"] }
 
 [profile.release]
 lto = true
 codegen-units = 1
-opt-level = "z"
+opt-level = 3
 strip = true
 panic = "abort"

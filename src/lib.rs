@@ -16,7 +16,7 @@ use core::{
     ResponseMode, ResponseSmoother, TunerMode, ACQUIRE_CONFIDENCE,
 };
 
-const ANALYSIS_WINDOW_SAMPLES: usize = 2_048;
+const ANALYSIS_WINDOW_SAMPLES: usize = 4_096;
 const ANALYSIS_HOP_SAMPLES: usize = 512;
 pub const HISTORY_LEN: usize = 160;
 

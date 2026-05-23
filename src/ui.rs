@@ -270,6 +270,7 @@ fn draw_controls(ui: &mut egui::Ui, params: &TraceTunerParams, setter: &ParamSet
             &[
                 (DetectionAlgorithm::Yin, "YIN"),
                 (DetectionAlgorithm::Mpm, "MPM"),
+                #[cfg(feature = "pyin-detector")]
                 (DetectionAlgorithm::Pyin, "pYIN"),
                 (DetectionAlgorithm::Acf, "ACF"),
             ],

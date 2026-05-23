@@ -1,4 +1,7 @@
-use nih_plug::{prelude::Enum, util::permit_alloc};
+use nih_plug::prelude::Enum;
+#[cfg(feature = "pyin-detector")]
+use nih_plug::util::permit_alloc;
+#[cfg(feature = "pyin-detector")]
 use pyin::{Framing, PYINExecutor};
 use std::f32::consts::PI;
 
@@ -47,6 +50,7 @@ pub enum DetectionAlgorithm {
     #[id = "mpm"]
     #[name = "MPM"]
     Mpm,
+    #[cfg(feature = "pyin-detector")]
     #[id = "pyin"]
     #[name = "pYIN"]
     Pyin,
@@ -199,8 +203,6 @@ pub struct PitchDetector {
 
     // --- shared ---
     pre_emphasized: Vec<f32>,
-    prev_input: f32,
-
     // --- YIN ---
     yin_difference: Vec<f32>,
     yin_cumulative_mean: Vec<f32>,
@@ -210,7 +212,9 @@ pub struct PitchDetector {
     mpm_nsdf: Vec<f32>,
 
     // --- pYIN ---
+    #[cfg(feature = "pyin-detector")]
     pyin_input: Vec<f64>,
+    #[cfg(feature = "pyin-detector")]
     pyin_executor: PYINExecutor<f64>,
 
     // --- ACF ---
@@ -229,12 +233,13 @@ impl PitchDetector {
             threshold: 0.14,
             window_size: max_window_samples,
             pre_emphasized: vec![0.0; max_window_samples],
-            prev_input: 0.0,
             yin_difference: vec![0.0; tau_len],
             yin_cumulative_mean: vec![0.0; tau_len],
             mpm_acf: vec![0.0; tau_len],
             mpm_nsdf: vec![0.0; tau_len],
+            #[cfg(feature = "pyin-detector")]
             pyin_input: vec![0.0; max_window_samples],
+            #[cfg(feature = "pyin-detector")]
             pyin_executor: Self::make_pyin_executor(sample_rate, max_window_samples, 70.0, 1_200.0),
             acf_windowed: vec![0.0; max_window_samples],
             hann_window: Self::make_hann_window(max_window_samples),
@@ -250,27 +255,30 @@ impl PitchDetector {
         self.mpm_acf.resize(tau_len, 0.0);
         self.mpm_nsdf.resize(tau_len, 0.0);
         self.pre_emphasized.resize(max_window_samples, 0.0);
+        #[cfg(feature = "pyin-detector")]
         self.pyin_input.resize(max_window_samples, 0.0);
-        self.pyin_executor = Self::make_pyin_executor(
-            sample_rate,
-            max_window_samples,
-            self.min_frequency_hz,
-            self.max_frequency_hz,
-        );
+        #[cfg(feature = "pyin-detector")]
+        {
+            self.pyin_executor = Self::make_pyin_executor(
+                sample_rate,
+                max_window_samples,
+                self.min_frequency_hz,
+                self.max_frequency_hz,
+            );
+        }
         self.acf_windowed.resize(max_window_samples, 0.0);
         self.hann_window.resize(max_window_samples, 0.0);
         self.hann_window = Self::make_hann_window(max_window_samples);
-        self.prev_input = 0.0;
     }
 
     pub fn reset(&mut self) {
-        self.prev_input = 0.0;
         self.pre_emphasized.fill(0.0);
         self.acf_windowed.fill(0.0);
         self.yin_difference.fill(0.0);
         self.yin_cumulative_mean.fill(0.0);
         self.mpm_acf.fill(0.0);
         self.mpm_nsdf.fill(0.0);
+        #[cfg(feature = "pyin-detector")]
         self.pyin_input.fill(0.0);
     }
 
@@ -283,6 +291,7 @@ impl PitchDetector {
             .collect()
     }
 
+    #[cfg(feature = "pyin-detector")]
     fn make_pyin_executor(
         sample_rate: f32,
         frame_length: usize,
@@ -327,6 +336,7 @@ impl PitchDetector {
         let mut estimate = match self.algorithm {
             DetectionAlgorithm::Yin => self.detect_yin(rms, n),
             DetectionAlgorithm::Mpm => self.detect_mpm(rms, n),
+            #[cfg(feature = "pyin-detector")]
             DetectionAlgorithm::Pyin => self.detect_pyin(rms, n),
             DetectionAlgorithm::Acf => self.detect_acf(rms, n),
         }?;
@@ -340,15 +350,13 @@ impl PitchDetector {
     // Returns (RMS of the filtered signal, number of samples processed).
     // ------------------------------------------------------------------
     fn apply_pre_emphasis(&mut self, samples: &[f32]) -> (f32, usize) {
-        let mut prev = self.prev_input;
         let mut energy = 0.0;
         for (i, sample) in samples.iter().enumerate() {
+            let prev = i.checked_sub(1).map_or(0.0, |prev| samples[prev]);
             let filtered = sample - PRE_EMPHASIS_ALPHA * prev;
-            prev = *sample;
             self.pre_emphasized[i] = filtered;
             energy += filtered * filtered;
         }
-        self.prev_input = prev;
         ((energy / samples.len() as f32).sqrt(), samples.len())
     }
 
@@ -513,6 +521,7 @@ impl PitchDetector {
     // returns ndarray results per call, so unlike the hand-written detectors
     // this is not a fully allocation-free real-time implementation.
     // ==================================================================
+    #[cfg(feature = "pyin-detector")]
     fn detect_pyin(&mut self, rms: f32, n: usize) -> Option<PitchEstimate> {
         if n < self.window_size {
             return None;
@@ -1073,6 +1082,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pyin-detector")]
     fn pyin_detects_440hz() {
         let freq = detect_freq(DetectionAlgorithm::Pyin, 440.0, 48_000.0);
         assert!((freq - 440.0).abs() < 3.0, "pyin detected: {freq}");
@@ -1156,6 +1166,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pyin-detector")]
     fn pyin_confidence_on_clean_sine() {
         let mut detector = PitchDetector::new(48_000.0, 2_048);
         detector.set_algorithm(DetectionAlgorithm::Pyin);
@@ -1214,6 +1225,7 @@ mod tests {
         let algs = [
             DetectionAlgorithm::Yin,
             DetectionAlgorithm::Mpm,
+            #[cfg(feature = "pyin-detector")]
             DetectionAlgorithm::Pyin,
             DetectionAlgorithm::Acf,
         ];
@@ -1242,7 +1254,9 @@ mod tests {
         detector.set_algorithm(DetectionAlgorithm::Mpm);
         let mpm = detector.detect(&samples).unwrap();
 
+        #[cfg(feature = "pyin-detector")]
         detector.set_algorithm(DetectionAlgorithm::Pyin);
+        #[cfg(feature = "pyin-detector")]
         let pyin = detector.detect(&samples).unwrap();
 
         detector.set_algorithm(DetectionAlgorithm::Acf);
@@ -1250,6 +1264,7 @@ mod tests {
 
         assert!((yin.frequency_hz - 440.0).abs() < 1.0);
         assert!((mpm.frequency_hz - 440.0).abs() < 2.0);
+        #[cfg(feature = "pyin-detector")]
         assert!((pyin.frequency_hz - 440.0).abs() < 3.0);
         assert!((acf.frequency_hz - 440.0).abs() < 3.0);
     }
@@ -1264,24 +1279,23 @@ mod tests {
         detector.reset();
         // After reset, silence should return None
         assert!(detector.detect(&[0.0; 2_048]).is_none());
-        // And prev_input should be 0, so a new sine should still detect correctly
+        // And a new sine should still detect correctly
         let pitch = detector.detect(&samples).unwrap();
         assert!((pitch.frequency_hz - 440.0).abs() < 1.0);
     }
 
     #[test]
-    fn pre_emphasis_state_carried_across_calls() {
+    fn pre_emphasis_is_independent_per_analysis_window() {
         let mut detector = PitchDetector::new(48_000.0, 2_048);
         detector.set_algorithm(DetectionAlgorithm::Yin);
 
-        let samples1 = sine_wave(440.0, 48_000.0, 1_024);
-        let samples2: Vec<f32> = (0..1_024)
-            .map(|i| (TAU * 440.0 * (i + 1_024) as f32 / 48_000.0).sin() * 0.4)
-            .collect();
+        let samples = sine_wave(440.0, 48_000.0, 2_048);
 
-        let _ = detector.detect(&samples1);
-        let pitch = detector.detect(&samples2).unwrap();
-        assert!((pitch.frequency_hz - 440.0).abs() < 1.0);
+        let first = detector.detect(&samples).unwrap();
+        let second = detector.detect(&samples).unwrap();
+
+        assert!((first.frequency_hz - second.frequency_hz).abs() < 0.001);
+        assert!((first.confidence - second.confidence).abs() < 0.001);
     }
 
     #[test]
@@ -1291,11 +1305,12 @@ mod tests {
     }
 
     #[test]
-    fn mpm_detects_low_e_string_with_larger_window() {
+    fn mpm_detects_low_e_string_with_production_window() {
         // MPM needs ~4+ periods in the window for reliable low-frequency detection.
         // With 2048 samples @ 48kHz (~3.5 periods for 82Hz) the NSDF peak can be
         // swamped by shorter-lag correlation. 4096 samples gives ~4.7 periods
-        // and restores the fundamental peak.
+        // and restores the fundamental peak. The plugin's production analysis
+        // window intentionally matches this size.
         let mut detector = PitchDetector::new(48_000.0, 4_096);
         detector.set_algorithm(DetectionAlgorithm::Mpm);
         let samples = sine_wave(82.41, 48_000.0, 4_096);

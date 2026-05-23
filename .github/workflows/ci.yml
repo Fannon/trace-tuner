@@ -38,6 +38,12 @@ jobs:
       - name: cargo check
         run: cargo check
 
+      - name: cargo check --no-default-features
+        run: cargo check --no-default-features
+
+      - name: cargo check --features gui
+        run: cargo check --features gui
+
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
