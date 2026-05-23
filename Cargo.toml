@@ -16,7 +16,8 @@ repository = "https://github.com/Fannon/trace-tuner"
 crate-type = ["cdylib", "lib"]
 
 [features]
-default = ["rt-alloc-check"]
+default = ["analysis-normalization", "rt-alloc-check"]
+analysis-normalization = []
 gui = ["dep:nih_plug_egui"]
 pyin-detector = ["dep:pyin"]
 rt-alloc-check = ["nih_plug/assert_process_allocs"]

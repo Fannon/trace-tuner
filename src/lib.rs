@@ -18,6 +18,12 @@ use core::{
 
 const ANALYSIS_WINDOW_SAMPLES: usize = 4_096;
 const ANALYSIS_HOP_SAMPLES: usize = 512;
+#[cfg(feature = "analysis-normalization")]
+const ANALYSIS_NORMALIZATION_FLOOR_RMS: f32 = 0.0025;
+#[cfg(feature = "analysis-normalization")]
+const ANALYSIS_NORMALIZATION_TARGET_RMS: f32 = 0.05;
+#[cfg(feature = "analysis-normalization")]
+const ANALYSIS_NORMALIZATION_MAX_GAIN: f32 = 8.0;
 pub const HISTORY_LEN: usize = 160;
 
 pub struct TraceTuner {
@@ -310,6 +316,8 @@ impl Plugin for TraceTuner {
                 let elapsed_samples = self.samples_since_analysis as u32;
                 self.samples_since_analysis = 0;
                 self.copy_analysis_window();
+                #[cfg(feature = "analysis-normalization")]
+                normalize_analysis_window(&mut self.analysis_scratch);
 
                 let detected = self
                     .detector
@@ -395,6 +403,33 @@ impl TraceTuner {
     }
 }
 
+#[cfg(feature = "analysis-normalization")]
+fn normalize_analysis_window(samples: &mut [f32]) -> f32 {
+    let rms = analysis_rms(samples);
+    if rms < ANALYSIS_NORMALIZATION_FLOOR_RMS {
+        return 1.0;
+    }
+
+    let gain =
+        (ANALYSIS_NORMALIZATION_TARGET_RMS / rms).clamp(1.0, ANALYSIS_NORMALIZATION_MAX_GAIN);
+    if gain > 1.0 {
+        for sample in samples {
+            *sample *= gain;
+        }
+    }
+    gain
+}
+
+#[cfg(feature = "analysis-normalization")]
+fn analysis_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+
+    let energy = samples.iter().map(|sample| sample * sample).sum::<f32>();
+    (energy / samples.len() as f32).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +446,41 @@ mod tests {
             target_frequency_hz: midi_note_frequency(midi_note, 440.0),
             cents,
         }
+    }
+
+    #[cfg(feature = "analysis-normalization")]
+    #[test]
+    fn analysis_normalization_boosts_quiet_signal_with_cap() {
+        let mut samples = [0.005_f32; 128];
+
+        let gain = normalize_analysis_window(&mut samples);
+
+        assert_eq!(gain, ANALYSIS_NORMALIZATION_MAX_GAIN);
+        assert!(samples.iter().all(|sample| (*sample - 0.04).abs() < 0.001));
+    }
+
+    #[cfg(feature = "analysis-normalization")]
+    #[test]
+    fn analysis_normalization_leaves_near_silence_unboosted() {
+        let mut samples = [0.001_f32; 128];
+
+        let gain = normalize_analysis_window(&mut samples);
+
+        assert_eq!(gain, 1.0);
+        assert!(samples
+            .iter()
+            .all(|sample| (*sample - 0.001).abs() < 0.0001));
+    }
+
+    #[cfg(feature = "analysis-normalization")]
+    #[test]
+    fn analysis_normalization_does_not_attenuate_loud_signal() {
+        let mut samples = [0.2_f32; 128];
+
+        let gain = normalize_analysis_window(&mut samples);
+
+        assert_eq!(gain, 1.0);
+        assert!(samples.iter().all(|sample| (*sample - 0.2).abs() < 0.0001));
     }
 
     #[test]

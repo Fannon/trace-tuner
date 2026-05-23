@@ -10,6 +10,7 @@ Trace Tuner is a compact tuner plugin for musicians and producers. It listens to
 - Chromatic tuning mode plus a guitar-string target mode
 - Stable and Fast response modes
 - Switchable pitch detectors: YIN, MPM, and ACF
+- Analysis-only input normalization to improve quiet-note detection
 - Optional pYIN comparison detector behind the `pyin-detector` build feature
 - Tuning history graph and fine-tune meter
 - A4 reference pitch from 430 Hz to 450 Hz
@@ -34,6 +35,7 @@ Trace Tuner is intended for modern DAWs that support CLAP or VST3 audio effects.
 - Use `Stable` for sustained tuning checks. It smooths the display and holds through short confidence dropouts as a note rings out.
 - Use `Fast` for faster tracking of bends, vibrato, slides, and quick note changes. It reacts sooner, but can jump more on ambiguous input.
 - Use `YIN` as the default detector, `MPM` for a harmonic-rich musical comparison, and `ACF` as a simple autocorrelation baseline.
+- Input normalization is enabled by default for the internal detection buffer only. It can boost quiet analysis windows up to a capped gain, but it does not alter the audio output.
 - Build with `--features pyin-detector` if you need the experimental pYIN comparison detector. It is not enabled by default because the current crate-based implementation allocates during detection.
 - Adjust `A4` if your session or instrument uses a reference other than 440 Hz.
 
@@ -70,6 +72,12 @@ Build release plugins with the GUI enabled:
 
 ```sh
 cargo xtask bundle trace_tuner --release --features gui
+```
+
+To disable analysis normalization for comparison builds:
+
+```sh
+cargo xtask bundle trace_tuner --release --no-default-features --features gui
 ```
 
 To include the experimental pYIN detector:
