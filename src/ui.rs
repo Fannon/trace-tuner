@@ -25,7 +25,6 @@ const TUNING_RANGE_CENTS: f32 = 50.0;
 const IN_TUNE_CENTS: f32 = 10.0;
 const HISTORY_MIN_HEIGHT: f32 = 146.0;
 const CONFIDENCE_METER_HEIGHT: f32 = 6.0;
-const METER_HEIGHT: f32 = 22.0;
 const CONTROL_HEIGHT: f32 = 24.0;
 const TRACE_BREAK_CENTS: f32 = 35.0;
 
@@ -60,7 +59,6 @@ pub fn create_editor(
                     draw_header(ui, snapshot);
                     draw_confidence_meter(ui, snapshot);
                     draw_history(ui, &history);
-                    draw_meter(ui, snapshot);
                     draw_controls(ui, &params, setter);
                 });
         },
@@ -140,7 +138,7 @@ fn draw_confidence_meter(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {
 }
 
 fn draw_history(ui: &mut egui::Ui, history: &[HistoryPoint; HISTORY_LEN]) {
-    let reserved_height = METER_HEIGHT + CONTROL_HEIGHT + ui.spacing().item_spacing.y * 2.0;
+    let reserved_height = CONTROL_HEIGHT + ui.spacing().item_spacing.y;
     let desired = Vec2::new(
         ui.available_width(),
         (ui.available_height() - reserved_height).max(HISTORY_MIN_HEIGHT),
@@ -214,53 +212,6 @@ fn trace_points_connect(previous: HistoryPoint, current: HistoryPoint) -> bool {
     previous.midi_note == current.midi_note
         && previous.held == current.held
         && (current.cents - previous.cents).abs() <= TRACE_BREAK_CENTS
-}
-
-fn draw_meter(ui: &mut egui::Ui, snapshot: DetectionSnapshot) {
-    let desired = Vec2::new(ui.available_width(), METER_HEIGHT);
-    let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
-    let painter = ui.painter_at(rect);
-
-    painter.rect_filled(rect, 4.0, PANEL);
-    let band_left = cents_to_x(rect, -IN_TUNE_CENTS);
-    let band_right = cents_to_x(rect, IN_TUNE_CENTS);
-    painter.rect_filled(
-        Rect::from_min_max(
-            Pos2::new(band_left, rect.top()),
-            Pos2::new(band_right, rect.bottom()),
-        ),
-        0.0,
-        Color32::from_rgba_unmultiplied(51, 188, 116, 24),
-    );
-
-    for cents in [-50.0_f32, -25.0, -10.0, 0.0, 10.0, 25.0, 50.0] {
-        let x = cents_to_x(rect, cents);
-        let stroke = if cents == 0.0 {
-            Stroke::new(1.5, Color32::from_rgb(128, 138, 148))
-        } else {
-            Stroke::new(1.0, GRID)
-        };
-        painter.line_segment(
-            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            stroke,
-        );
-    }
-
-    if snapshot.active {
-        let x = cents_to_x(
-            rect,
-            snapshot
-                .cents
-                .clamp(-TUNING_RANGE_CENTS, TUNING_RANGE_CENTS),
-        );
-        let stroke = Stroke::new(
-            4.0,
-            faded_line_color_for_cents(snapshot.cents, snapshot.confidence),
-        );
-        let top = Pos2::new(x, rect.top());
-        let bottom = Pos2::new(x, rect.bottom());
-        painter.line_segment([top, bottom], stroke);
-    }
 }
 
 fn draw_controls(ui: &mut egui::Ui, params: &TraceTunerParams, setter: &ParamSetter) {
@@ -404,10 +355,6 @@ fn step_button(
 
 fn cents_to_y(rect: Rect, cents: f32) -> f32 {
     rect.center().y - (cents / TUNING_RANGE_CENTS) * rect.height() * 0.5
-}
-
-fn cents_to_x(rect: Rect, cents: f32) -> f32 {
-    rect.center().x + (cents / TUNING_RANGE_CENTS) * rect.width() * 0.5
 }
 
 fn confidence_color(confidence: f32) -> Color32 {

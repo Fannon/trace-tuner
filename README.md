@@ -13,7 +13,7 @@ Trace Tuner is a compact tuner plugin for musicians and producers. It listens to
 - Minimal confidence meter
 - Analysis-only input normalization to improve quiet-note detection
 - Optional pYIN comparison detector behind the `pyin-detector` build feature
-- Tuning history graph and fine-tune meter
+- Tuning history graph
 - A4 reference pitch from 430 Hz to 450 Hz
 - Audio passthrough: the plugin does not alter the incoming signal
 - Optional MIDI note output from the detected target note
