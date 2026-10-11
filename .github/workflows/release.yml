@@ -35,6 +35,9 @@ jobs:
       - name: cargo test
         run: cargo test --all-features
 
+      - name: Check detector and complete callback allocations
+        run: cargo test --no-default-features --features analysis-normalization
+
       - name: cargo check
         run: cargo check
 
@@ -111,10 +114,14 @@ jobs:
       - name: Prepare Artifacts
         shell: pwsh
         run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Could not read package version" }
+          $version = ($metadata.packages | Where-Object name -eq trace_tuner).version
           New-Item -ItemType Directory -Force -Path dist/TraceTuner | Out-Null
           Copy-Item -Recurse -Force "target/bundled/TraceTuner.vst3" "dist/TraceTuner/TraceTuner.vst3"
           Copy-Item -Recurse -Force "target/bundled/TraceTuner.clap" "dist/TraceTuner/TraceTuner.clap"
-          Compress-Archive -Path dist/TraceTuner -DestinationPath "dist/TraceTuner_${{ matrix.os-name }}.zip" -Force
+          Copy-Item README.md, CHANGELOG.md, LICENSE -Destination dist/TraceTuner
+          Compress-Archive -Path dist/TraceTuner -DestinationPath "dist/TraceTuner_v${version}_${{ matrix.os-name }}.zip" -Force
 
       - name: Upload pluginval logs
         if: always() && matrix.os == 'windows-latest'
@@ -138,17 +145,52 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
+
       - name: Download all artifacts
         uses: actions/download-artifact@v5
         with:
           path: output
+          pattern: '*-zip'
           merge-multiple: true
+
+      - name: Prepare changelog and checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          import re
+          import tomllib
+
+          version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
+          tag = os.environ['RELEASE_TAG']
+          if tag != f'v{version}':
+              raise SystemExit(f'Tag {tag} does not match package version {version}')
+          changelog = Path('CHANGELOG.md').read_text()
+          entry = re.search(rf'(?ms)^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)', changelog)
+          if not entry:
+              raise SystemExit(f'Missing changelog entry for {version}')
+          Path('release-notes.md').write_text(entry.group(1).strip() + '\n')
+          archives = sorted(Path('output').glob('*.zip'))
+          expected = {f'TraceTuner_v{version}_{platform}.zip' for platform in ('windows', 'macos', 'linux')}
+          if {archive.name for archive in archives} != expected:
+              raise SystemExit(f'Expected all three platform archives: {sorted(expected)}')
+          checksums = ''.join(f'{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n' for archive in archives)
+          Path('output/SHA256SUMS.txt').write_text(checksums)
+          PY
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: output/*.zip
-          generate_release_notes: true
+          name: Trace Tuner ${{ github.ref_name }}
+          files: |
+            output/*.zip
+            output/SHA256SUMS.txt
+          body_path: release-notes.md
+          fail_on_unmatched_files: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           overwrite_files: true

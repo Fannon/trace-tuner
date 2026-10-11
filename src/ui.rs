@@ -45,7 +45,12 @@ pub fn create_editor(
             ctx.set_visuals(visuals);
         },
         move |egui_ctx, setter, _state| {
-            egui_ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            let refresh_ms = if params.response.value() == ResponseMode::Fast {
+                16
+            } else {
+                33
+            };
+            egui_ctx.request_repaint_after(std::time::Duration::from_millis(refresh_ms));
 
             CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(BG))
@@ -161,9 +166,9 @@ fn draw_history(ui: &mut egui::Ui, history: &[HistoryPoint; HISTORY_LEN]) {
     for cents in [-50.0_f32, -25.0, -10.0, 0.0, 10.0, 25.0, 50.0] {
         let y = cents_to_y(rect, cents);
         let stroke = if cents == 0.0 {
-            Stroke::new(1.5, Color32::from_rgb(92, 102, 113))
+            Stroke::new(1.5_f32, Color32::from_rgb(92, 102, 113))
         } else {
-            Stroke::new(1.0, GRID)
+            Stroke::new(1.0_f32, GRID)
         };
         painter.line_segment(
             [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
@@ -189,9 +194,9 @@ fn draw_history(ui: &mut egui::Ui, history: &[HistoryPoint; HISTORY_LEN]) {
                     let segment_confidence = point_data.confidence.min(last_data.confidence);
                     let stroke = Stroke::new(
                         if point_data.held && last_data.held {
-                            2.0
+                            2.0_f32
                         } else {
-                            2.5
+                            2.5_f32
                         },
                         faded_line_color_for_cents(
                             (last_data.cents + point_data.cents) * 0.5,

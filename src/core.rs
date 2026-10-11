@@ -1,12 +1,13 @@
+use crate::autocorrelation::Autocorrelation;
 use nih_plug::prelude::Enum;
 #[cfg(feature = "pyin-detector")]
 use nih_plug::util::permit_alloc;
 #[cfg(feature = "pyin-detector")]
 use pyin::{Framing, PYINExecutor};
-use std::f32::consts::PI;
 
 pub const MIDI_VELOCITY: f32 = 100.0 / 127.0;
 pub const SILENCE_TIMEOUT_MS: f32 = 120.0;
+pub const FAST_SILENCE_TIMEOUT_MS: f32 = 40.0;
 
 pub(crate) const ACQUIRE_CONFIDENCE: f32 = 0.80;
 pub(crate) const HOLD_CONFIDENCE: f32 = 0.60;
@@ -126,7 +127,11 @@ pub fn midi_note_frequency(midi_note: u8, reference_pitch_hz: f32) -> f32 {
 }
 
 pub fn chromatic_note_match(frequency_hz: f32, reference_pitch_hz: f32) -> Option<NoteMatch> {
-    if frequency_hz <= 0.0 || reference_pitch_hz <= 0.0 {
+    if !frequency_hz.is_finite()
+        || !reference_pitch_hz.is_finite()
+        || frequency_hz <= 0.0
+        || reference_pitch_hz <= 0.0
+    {
         return None;
     }
 
@@ -145,7 +150,11 @@ pub fn chromatic_note_match(frequency_hz: f32, reference_pitch_hz: f32) -> Optio
 }
 
 pub fn guitar_note_match(frequency_hz: f32, reference_pitch_hz: f32) -> Option<NoteMatch> {
-    if frequency_hz <= 0.0 || reference_pitch_hz <= 0.0 {
+    if !frequency_hz.is_finite()
+        || !reference_pitch_hz.is_finite()
+        || frequency_hz <= 0.0
+        || reference_pitch_hz <= 0.0
+    {
         return None;
     }
 
@@ -203,6 +212,7 @@ pub struct PitchDetector {
 
     // --- shared ---
     pre_emphasized: Vec<f32>,
+    autocorrelation: Autocorrelation,
     // --- YIN ---
     yin_difference: Vec<f32>,
     yin_cumulative_mean: Vec<f32>,
@@ -215,11 +225,10 @@ pub struct PitchDetector {
     #[cfg(feature = "pyin-detector")]
     pyin_input: Vec<f64>,
     #[cfg(feature = "pyin-detector")]
-    pyin_executor: PYINExecutor<f64>,
+    pyin_executor: Option<PYINExecutor<f64>>,
 
     // --- ACF ---
     acf_windowed: Vec<f32>,
-    hann_window: Vec<f32>,
 }
 
 impl PitchDetector {
@@ -228,11 +237,12 @@ impl PitchDetector {
         Self {
             algorithm: DetectionAlgorithm::Yin,
             sample_rate,
-            min_frequency_hz: 70.0,
-            max_frequency_hz: 1_200.0,
+            min_frequency_hz: 28.0,
+            max_frequency_hz: 2_000.0,
             threshold: 0.14,
             window_size: max_window_samples,
             pre_emphasized: vec![0.0; max_window_samples],
+            autocorrelation: Autocorrelation::new(max_window_samples),
             yin_difference: vec![0.0; tau_len],
             yin_cumulative_mean: vec![0.0; tau_len],
             mpm_acf: vec![0.0; tau_len],
@@ -240,14 +250,16 @@ impl PitchDetector {
             #[cfg(feature = "pyin-detector")]
             pyin_input: vec![0.0; max_window_samples],
             #[cfg(feature = "pyin-detector")]
-            pyin_executor: Self::make_pyin_executor(sample_rate, max_window_samples, 70.0, 1_200.0),
+            pyin_executor: Self::make_pyin_executor(sample_rate, max_window_samples, 28.0, 2_000.0),
             acf_windowed: vec![0.0; max_window_samples],
-            hann_window: Self::make_hann_window(max_window_samples),
         }
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32, max_window_samples: usize) {
         self.sample_rate = sample_rate;
+        if self.window_size != max_window_samples {
+            self.autocorrelation = Autocorrelation::new(max_window_samples);
+        }
         self.window_size = max_window_samples;
         let tau_len = max_window_samples / 2 + 1;
         self.yin_difference.resize(tau_len, 0.0);
@@ -267,8 +279,6 @@ impl PitchDetector {
             );
         }
         self.acf_windowed.resize(max_window_samples, 0.0);
-        self.hann_window.resize(max_window_samples, 0.0);
-        self.hann_window = Self::make_hann_window(max_window_samples);
     }
 
     pub fn reset(&mut self) {
@@ -282,31 +292,34 @@ impl PitchDetector {
         self.pyin_input.fill(0.0);
     }
 
-    fn make_hann_window(n: usize) -> Vec<f32> {
-        if n <= 1 {
-            return vec![1.0; n];
-        }
-        (0..n)
-            .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / (n - 1) as f32).cos()))
-            .collect()
-    }
-
     #[cfg(feature = "pyin-detector")]
     fn make_pyin_executor(
         sample_rate: f32,
         frame_length: usize,
         min_frequency_hz: f32,
         max_frequency_hz: f32,
-    ) -> PYINExecutor<f64> {
-        PYINExecutor::new(
+    ) -> Option<PYINExecutor<f64>> {
+        let analysis_frame = frame_length * 3 / 4;
+        let win_length = frame_length / 4;
+        let rate = sample_rate.round() as u32;
+        if !sample_rate.is_finite() || sample_rate <= 2.0 * max_frequency_hz || frame_length < 32 {
+            return None;
+        }
+        let min_period = (rate as f32 / max_frequency_hz).floor() as usize;
+        let max_period =
+            ((rate as f32 / min_frequency_hz).ceil() as usize).min(analysis_frame - win_length - 1);
+        if max_period < min_period + 2 {
+            return None;
+        }
+        Some(PYINExecutor::new(
             min_frequency_hz as f64,
             max_frequency_hz as f64,
             sample_rate.round().max(1.0) as u32,
-            frame_length,
+            analysis_frame,
+            Some(win_length),
+            Some((frame_length / 8).max(1)),
             None,
-            Some(frame_length),
-            None,
-        )
+        ))
     }
 
     pub fn set_algorithm(&mut self, algorithm: DetectionAlgorithm) {
@@ -321,15 +334,17 @@ impl PitchDetector {
     // Public entry point – applies pre-emphasis then dispatches
     // ------------------------------------------------------------------
     pub fn detect(&mut self, samples: &[f32]) -> Option<PitchEstimate> {
-        if samples.len() < 32 || self.sample_rate <= 0.0 {
+        if samples.len() < 32 || !self.sample_rate.is_finite() || self.sample_rate <= 0.0 {
             return None;
         }
-        if samples.len() > self.pre_emphasized.len() {
+        if samples.len() > self.pre_emphasized.len()
+            || samples.iter().any(|sample| !sample.is_finite())
+        {
             return None;
         }
 
         let (rms, n) = self.apply_pre_emphasis(samples);
-        if rms < MIN_ANALYSIS_RMS {
+        if !rms.is_finite() || rms < MIN_ANALYSIS_RMS {
             return None;
         }
 
@@ -350,10 +365,12 @@ impl PitchDetector {
     // Returns (RMS of the filtered signal, number of samples processed).
     // ------------------------------------------------------------------
     fn apply_pre_emphasis(&mut self, samples: &[f32]) -> (f32, usize) {
+        let mean = (samples.iter().map(|&sample| f64::from(sample)).sum::<f64>()
+            / samples.len() as f64) as f32;
         let mut energy = 0.0;
         for (i, sample) in samples.iter().enumerate() {
-            let prev = i.checked_sub(1).map_or(0.0, |prev| samples[prev]);
-            let filtered = sample - PRE_EMPHASIS_ALPHA * prev;
+            let prev = i.checked_sub(1).map_or(0.0, |prev| samples[prev] - mean);
+            let filtered = (sample - mean) - PRE_EMPHASIS_ALPHA * prev;
             self.pre_emphasized[i] = filtered;
             energy += filtered * filtered;
         }
@@ -365,7 +382,9 @@ impl PitchDetector {
     // ------------------------------------------------------------------
     fn tau_range(&self, window_len: usize) -> Option<(usize, usize)> {
         let max_tau = ((self.sample_rate / self.min_frequency_hz) as usize)
-            .min(window_len.saturating_sub(2))
+            // At least two periods are required; otherwise a tiny overlap
+            // near the end of a short frame can produce false confidence.
+            .min(window_len / 2)
             .min(self.yin_difference.len().saturating_sub(1));
         let min_tau = ((self.sample_rate / self.max_frequency_hz) as usize).max(2);
         if max_tau <= min_tau + 2 {
@@ -388,17 +407,14 @@ impl PitchDetector {
     fn detect_yin(&mut self, rms: f32, n: usize) -> Option<PitchEstimate> {
         let (min_tau, max_tau) = self.tau_range(n)?;
 
+        self.autocorrelation
+            .compute(&self.pre_emphasized[..n], &mut self.mpm_acf[..=max_tau]);
         self.yin_difference[0] = 0.0;
         for tau in 1..=max_tau {
-            let window_limit = n - tau;
-            let a = &self.pre_emphasized[..window_limit];
-            let b = &self.pre_emphasized[tau..tau + window_limit];
-            let mut sum = 0.0;
-            for i in 0..window_limit {
-                let delta = a[i] - b[i];
-                sum += delta * delta;
-            }
-            self.yin_difference[tau] = sum;
+            let (front, back) = self.autocorrelation.overlapping_energy(n, tau);
+            // Sum (a-b)^2 = sum a^2 + sum b^2 - 2*sum ab. Clamp tiny
+            // negative values from FFT rounding at perfectly periodic lags.
+            self.yin_difference[tau] = (front + back - 2.0 * self.mpm_acf[tau]).max(0.0);
         }
 
         self.yin_cumulative_mean[0] = 1.0;
@@ -415,15 +431,21 @@ impl PitchDetector {
         let mut tau = min_tau;
         while tau <= max_tau {
             if self.yin_cumulative_mean[tau] < self.threshold {
-                while tau < max_tau
-                    && self.yin_cumulative_mean[tau + 1] < self.yin_cumulative_mean[tau]
-                {
+                // Noise can create several tiny local minima inside the same
+                // period valley. Select its lowest point, not its first ripple.
+                let mut minimum = tau;
+                while tau < max_tau && self.yin_cumulative_mean[tau + 1] < self.threshold {
                     tau += 1;
+                    if self.yin_cumulative_mean[tau] < self.yin_cumulative_mean[minimum] {
+                        minimum = tau;
+                    }
                 }
+                let valley_end = tau;
+                tau = minimum;
                 let better_tau = parabolic_interpolation(&self.yin_cumulative_mean, tau, max_tau);
                 let frequency_hz = self.sample_rate / better_tau;
                 if frequency_hz < self.min_frequency_hz || frequency_hz > self.max_frequency_hz {
-                    tau += 1;
+                    tau = valley_end + 1;
                     continue;
                 }
                 let confidence = (1.0 - self.yin_cumulative_mean[tau]).clamp(0.0, 1.0);
@@ -472,29 +494,16 @@ impl PitchDetector {
     fn detect_mpm(&mut self, rms: f32, n: usize) -> Option<PitchEstimate> {
         let (min_tau, max_tau) = self.tau_range(n)?;
 
-        self.mpm_acf[0] = 0.0;
-        for i in 0..n {
-            self.mpm_acf[0] += self.pre_emphasized[i] * self.pre_emphasized[i];
-        }
+        self.autocorrelation
+            .compute(&self.pre_emphasized[..n], &mut self.mpm_acf[..=max_tau]);
         if self.mpm_acf[0] < 1e-10 {
             return None;
         }
 
         for tau in 1..=max_tau {
-            let window_limit = n - tau;
-            let a = &self.pre_emphasized[..window_limit];
-            let b = &self.pre_emphasized[tau..tau + window_limit];
-            let mut r = 0.0;
-            let mut r_front = 0.0;
-            let mut r_back = 0.0;
-            for i in 0..window_limit {
-                r += a[i] * b[i];
-                r_front += a[i] * a[i];
-                r_back += b[i] * b[i];
-            }
-            self.mpm_acf[tau] = r;
+            let (r_front, r_back) = self.autocorrelation.overlapping_energy(n, tau);
             self.mpm_nsdf[tau] = if r_front > 1e-10 && r_back > 1e-10 {
-                (2.0 * r / (r_front + r_back)).clamp(-1.0, 1.0)
+                (2.0 * self.mpm_acf[tau] / (r_front + r_back)).clamp(-1.0, 1.0)
             } else {
                 0.0
             };
@@ -531,31 +540,34 @@ impl PitchDetector {
             self.pyin_input[i] = self.pre_emphasized[i] as f64;
         }
 
-        let (_timestamps, f0, voiced_flag, voiced_prob) = permit_alloc(|| {
-            self.pyin_executor
-                .pyin(&self.pyin_input[..n], f64::NAN, Framing::Valid)
-        });
+        // pYIN starts in an unvoiced Viterbi state, so it needs multiple real
+        // frames. Keep result destruction inside the allocation exemption too.
+        let executor = self.pyin_executor.as_mut()?;
+        permit_alloc(|| {
+            let (_timestamps, f0, voiced_flag, voiced_prob) =
+                executor.pyin(&self.pyin_input[..n], f64::NAN, Framing::Valid);
+            f0.iter()
+                .zip(voiced_flag.iter())
+                .zip(voiced_prob.iter())
+                .rev()
+                .find_map(|((&frequency_hz, &voiced), &probability)| {
+                    if !voiced || !frequency_hz.is_finite() {
+                        return None;
+                    }
 
-        f0.iter()
-            .zip(voiced_flag.iter())
-            .zip(voiced_prob.iter())
-            .rev()
-            .find_map(|((&frequency_hz, &voiced), &probability)| {
-                if !voiced || !frequency_hz.is_finite() {
-                    return None;
-                }
+                    let frequency_hz = frequency_hz as f32;
+                    if frequency_hz < self.min_frequency_hz || frequency_hz > self.max_frequency_hz
+                    {
+                        return None;
+                    }
 
-                let frequency_hz = frequency_hz as f32;
-                if frequency_hz < self.min_frequency_hz || frequency_hz > self.max_frequency_hz {
-                    return None;
-                }
-
-                Some(PitchEstimate {
-                    frequency_hz,
-                    confidence: (probability as f32).clamp(0.0, 1.0),
-                    rms,
+                    Some(PitchEstimate {
+                        frequency_hz,
+                        confidence: (probability as f32).clamp(0.0, 1.0),
+                        rms,
+                    })
                 })
-            })
+        })
     }
 
     // ==================================================================
@@ -578,28 +590,26 @@ impl PitchDetector {
     fn detect_acf(&mut self, rms: f32, n: usize) -> Option<PitchEstimate> {
         let (min_tau, max_tau) = self.tau_range(n)?;
 
-        // Hann window the pre-emphasised samples
+        // Generate the Hann window for the actual frame length. A recurrence
+        // avoids N trigonometric calls and works with adaptive short frames.
+        let step = std::f64::consts::TAU / (n - 1) as f64;
+        let (sin_step, cos_step) = step.sin_cos();
+        let (mut sin, mut cos) = (0.0, 1.0);
         for i in 0..n {
-            self.acf_windowed[i] = self.pre_emphasized[i] * self.hann_window[i];
+            self.acf_windowed[i] = self.pre_emphasized[i] * (0.5 * (1.0 - cos)) as f32;
+            (sin, cos) = (
+                sin * cos_step + cos * sin_step,
+                cos * cos_step - sin * sin_step,
+            );
         }
 
-        // Raw autocorrelation
-        self.mpm_acf[0] = 0.0;
-        for i in 0..n {
-            self.mpm_acf[0] += self.acf_windowed[i] * self.acf_windowed[i];
-        }
+        // Zero-padded FFT computes the same linear autocorrelation as the
+        // direct lag loops, with bounded O(N log N) work per analysis frame.
+        self.autocorrelation
+            .compute(&self.acf_windowed[..n], &mut self.mpm_acf[..=max_tau]);
         let r0 = self.mpm_acf[0];
         if r0 < 1e-10 {
             return None;
-        }
-
-        for tau in 1..=max_tau {
-            let window_limit = n - tau;
-            let mut r = 0.0;
-            for i in 0..window_limit {
-                r += self.acf_windowed[i] * self.acf_windowed[i + tau];
-            }
-            self.mpm_acf[tau] = r;
         }
 
         // Find first local peak above threshold in normalised ACF
@@ -637,7 +647,8 @@ pub struct ResponseSmoother {
     current: DetectionSnapshot,
     candidate_note: Option<u8>,
     candidate_count: u8,
-    missing_count: u8,
+    missing_count: u32,
+    analysis_interval_ms: f32,
 }
 
 impl ResponseSmoother {
@@ -648,6 +659,7 @@ impl ResponseSmoother {
             candidate_note: None,
             candidate_count: 0,
             missing_count: 0,
+            analysis_interval_ms: 512.0 / 48.0,
         }
     }
 
@@ -658,6 +670,10 @@ impl ResponseSmoother {
             self.candidate_count = 0;
             self.missing_count = 0;
         }
+    }
+
+    pub fn set_analysis_interval(&mut self, interval_ms: f32) {
+        self.analysis_interval_ms = interval_ms.max(0.1);
     }
 
     pub fn reset(&mut self) {
@@ -717,10 +733,11 @@ impl ResponseSmoother {
     fn accept(&mut self, next: DetectionSnapshot) {
         let mut next = next;
         next.held = false;
-        let weight = match self.mode {
+        let base_weight: f32 = match self.mode {
             ResponseMode::Stable => 0.25,
             ResponseMode::Fast => 0.65,
         };
+        let weight = 1.0 - (1.0 - base_weight).powf(self.analysis_interval_ms / (512.0 / 48.0));
 
         if self.current.active && self.current.midi_note == next.midi_note {
             self.current.frequency_hz =
@@ -757,10 +774,14 @@ impl ResponseSmoother {
 
         if self.current.active {
             self.missing_count = self.missing_count.saturating_add(1);
-            let hold_frames = match self.mode {
+            let legacy_frames = match self.mode {
                 ResponseMode::Stable => STABLE_DISPLAY_HOLD_FRAMES,
                 ResponseMode::Fast => FAST_DISPLAY_HOLD_FRAMES,
             };
+            let hold_frames = (f32::from(legacy_frames) * (512.0 / 48.0)
+                / self.analysis_interval_ms)
+                .round()
+                .max(1.0) as u32;
             if self.missing_count < hold_frames {
                 let held_progress = self.missing_count as f32 / hold_frames as f32;
                 self.current.confidence = HOLD_CONFIDENCE * (1.0 - held_progress);
@@ -783,16 +804,24 @@ pub struct MidiState {
     active_note: Option<u8>,
     silence_samples: u32,
     silence_timeout_samples: u32,
+    fast_silence_timeout_samples: u32,
     candidate_note: Option<u8>,
     candidate_count: u8,
 }
 
 impl MidiState {
+    pub fn active_note(&self) -> Option<u8> {
+        self.active_note
+    }
+
     pub fn new(sample_rate: f32) -> Self {
         Self {
             active_note: None,
             silence_samples: 0,
             silence_timeout_samples: silence_timeout_samples(sample_rate),
+            fast_silence_timeout_samples: (sample_rate * FAST_SILENCE_TIMEOUT_MS / 1_000.0)
+                .round()
+                .max(1.0) as u32,
             candidate_note: None,
             candidate_count: 0,
         }
@@ -800,6 +829,9 @@ impl MidiState {
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.silence_timeout_samples = silence_timeout_samples(sample_rate);
+        self.fast_silence_timeout_samples = (sample_rate * FAST_SILENCE_TIMEOUT_MS / 1_000.0)
+            .round()
+            .max(1.0) as u32;
     }
 
     pub fn reset(&mut self) {
@@ -826,7 +858,12 @@ impl MidiState {
             if self.active_note.is_some() {
                 self.silence_samples = self.silence_samples.saturating_add(elapsed_samples);
             }
-            if self.silence_samples >= self.silence_timeout_samples {
+            let timeout = if mode == ResponseMode::Fast {
+                self.fast_silence_timeout_samples
+            } else {
+                self.silence_timeout_samples
+            };
+            if self.silence_samples >= timeout {
                 self.silence_samples = 0;
                 return self
                     .active_note
@@ -929,7 +966,13 @@ fn visit_mpm_key_peaks(
     max_tau: usize,
     mut visitor: impl FnMut(usize, f32) -> bool,
 ) {
-    let mut tau = min_tau.max(1);
+    // Discard the positive lobe attached to zero lag. Noise may put a local
+    // maximum inside it, but that maximum is not a waveform period.
+    let mut tau = 1;
+    while tau < max_tau && nsdf[tau] > 0.0 {
+        tau += 1;
+    }
+    tau = tau.max(min_tau);
     while tau < max_tau {
         while tau < max_tau && nsdf[tau] <= 0.0 {
             tau += 1;
@@ -1792,18 +1835,24 @@ mod tests {
 
     #[test]
     fn midi_silence_below_timeout_returns_none() {
-        let mut midi = MidiState::new(48_000.0);
-        midi.update(Some(active_snapshot(69, 0.0)), ResponseMode::Fast, 128);
-
-        let timeout = silence_timeout_samples(48_000.0);
-        assert_eq!(
-            midi.update(None, ResponseMode::Fast, timeout / 2),
-            MidiDecision::None
-        );
-        assert_eq!(
-            midi.update(None, ResponseMode::Fast, timeout / 2 - 1),
-            MidiDecision::None
-        );
+        for (mode, timeout) in [(ResponseMode::Fast, 1_920), (ResponseMode::Stable, 5_760)] {
+            for rate in [48_000.0, 96_000.0] {
+                let mut midi = MidiState::new(rate);
+                for _ in 0..3 {
+                    midi.update(Some(active_snapshot(69, 0.0)), mode, 128);
+                }
+                let samples = if rate == 96_000.0 {
+                    timeout * 2
+                } else {
+                    timeout
+                };
+                assert_eq!(midi.update(None, mode, samples - 1), MidiDecision::None);
+                assert_eq!(
+                    midi.update(None, mode, 1),
+                    MidiDecision::NoteOff { note: 69 }
+                );
+            }
+        }
     }
 
     #[test]

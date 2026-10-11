@@ -35,6 +35,9 @@ jobs:
       - name: cargo test
         run: cargo test --all-features
 
+      - name: Check detector and complete callback allocations
+        run: cargo test --no-default-features --features analysis-normalization
+
       - name: cargo check
         run: cargo check
 
